@@ -1,0 +1,32 @@
+MCU Pin,Net,Firmware Macro,Function,Build
+BOOT0,BOOT0,-,10k pull-down to GND,both
+NRST,NRST,-,"Reset, 10k pull-up + 100nF",both
+PA0,LIMIT_OPEN,LIMIT_OPEN,Open limit input,both
+PA0,EXTI0,-,shared: limit open (PA0) / sensor out (PB0),both
+PA1,LIMIT_CLOSE,LIMIT_CLOSE,Close limit input,both
+PA1,EXTI1,-,shared: limit close (PA1) / sensor in (PB1),both
+PA4,MOTOR_IA,MOTOR_IA,L9110S IA,both
+PA5,MOTOR_IB,MOTOR_IB,L9110S IB,both
+PA9,USART1_TX,UART_TX,Console TX,both
+PA10,USART1_RX,UART_RX,Console RX,both
+PA13,SWDIO,-,Debug data - must stay free,both
+PA14,SWCLK,-,Debug clock - must stay free,both
+PB0,SENSOR_OUT,SENSOR_OUT,Outside presence,both
+PB1,SENSOR_IN,SENSOR_IN,Inside presence,both
+PB3,BUZZER,BUZZER,Buzzer drive,both
+PB4,LED_STATUS,STATUS_LED,Status LED (state blink),both
+PB5,KEY1,KEY1,Start / stop,both
+PB6,KEY2,KEY2,Mode toggle,both
+PB7,KEY3,KEY3,Manual open,both
+PB8,KEY4,KEY4,Manual close / e-stop,both
+PB10,I2C_SCL,MYI2C_SCL,I2C clock,real
+PB10,LCD_D4,LCD1602_D4,1602 data bit 4,sim
+PB11,I2C_SDA,MYI2C_SDA,I2C data,real
+PB11,LCD_D5,LCD1602_D5,1602 data bit 5,sim
+PB12,LCD_D6,LCD1602_D6,1602 data bit 6,sim
+PB13,LCD_D7,LCD1602_D7,1602 data bit 7,sim
+PB14,LCD_RS,LCD1602_RS,1602 register select,sim
+PB15,LCD_EN,LCD1602_EN,1602 enable,sim
+PC13,(reserved),LED,Duplicate/unused LED macros - no firmware code references them,unused
+PD0,OSC_IN,-,8 MHz crystal,both
+PD1,OSC_OUT,-,8 MHz crystal,both

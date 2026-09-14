@@ -27,15 +27,39 @@ void Limit_Init(void)
 
     RCC_APB2PeriphClockCmd(LIMIT_RCC, ENABLE);
 
-    /* NC contact: closed (door away from the limit) pulls the pin to ground, so
-       with the internal pull-up enabled the pin reads low while idle and goes
-       high when the switch trips. A broken wire also reads high - fail-safe. */
+    /*
+     * WIRING - both contacts of the SPDT switch are used, on two electrically
+     * separate circuits that share one mechanical actuation:
+     *
+     *   NC contact : in series in the +5V -> L9110S VM path. This is the SAFETY
+     *                layer and it never touches the MCU - a limit removes motor
+     *                power even if the firmware is hung.
+     *   NO contact : COM to GND, NO to the MCU pin with a 10k pull-up to +3V3.
+     *                This is the READBACK layer.
+     *
+     * An earlier version of the schematic notes had COM to GND and NC to the MCU,
+     * which cannot work: the same NC contact cannot also carry the 5 V motor
+     * supply, and having it do so would put 5 V on a pin whose absolute maximum
+     * is 3.6 V. Using the NO contact for readback keeps the 5 V and 3.3 V domains
+     * apart with no level shifting.
+     *
+     * Sense is therefore INVERTED relative to a NC readback:
+     *
+     *   door away from limit : NO open    -> pull-up wins -> pin HIGH
+     *   door AT the limit    : NO closed  -> pulled to GND -> pin LOW
+     *
+     * so activeLevel is 0. The trade-off is that a broken readback wire now reads
+     * "not at limit" rather than "at limit" - the state machine will sit until the
+     * 5 s travel watchdog fires. The hardware power cut still protects the
+     * mechanism, so this costs diagnostics, not safety.
+     */
     GPIO_InitStructure.GPIO_Pin  = LIMIT_OPEN_PIN | LIMIT_CLOSE_PIN;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init(LIMIT_OPEN_PORT, &GPIO_InitStructure);
 
-    Debounce_Init(&s_open,  LIMIT_OPEN_PORT,  LIMIT_OPEN_PIN,  1U, LIMIT_DEBOUNCE_MS);
-    Debounce_Init(&s_close, LIMIT_CLOSE_PORT, LIMIT_CLOSE_PIN, 1U, LIMIT_DEBOUNCE_MS);
+    /* activeLevel = 0: the pin is pulled LOW when the door reaches the limit. */
+    Debounce_Init(&s_open,  LIMIT_OPEN_PORT,  LIMIT_OPEN_PIN,  0U, LIMIT_DEBOUNCE_MS);
+    Debounce_Init(&s_close, LIMIT_CLOSE_PORT, LIMIT_CLOSE_PIN, 0U, LIMIT_DEBOUNCE_MS);
 
     /* Preemption priority 0: above the sensors (2) and the keys (3), because a
        limit event must never wait behind a "someone approached" event. */

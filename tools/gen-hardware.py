@@ -42,7 +42,16 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 MAIN_H = os.path.join(ROOT, "Core", "main.h")
-OUT_DIR = os.path.join(ROOT, "hardware")
+
+# Output goes to "generated/", NOT "hardware/".
+#
+# On Windows the filesystem is case-insensitive, so "hardware/" and the driver
+# source tree "Hardware/" are the SAME directory - an earlier version of this
+# script wrote bom.csv, mcu-pinout.csv and netlist.txt straight into the driver
+# tree. That mixes generated artifacts in with hand-written sources, which makes
+# it impossible to tell at a glance what is source and what is derivative.
+# A distinct name removes the ambiguity entirely rather than relying on case.
+OUT_DIR = os.path.join(ROOT, "generated")
 
 # ---------------------------------------------------------------------------
 # Build variants

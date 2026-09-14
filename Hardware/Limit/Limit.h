@@ -11,18 +11,26 @@
   *
   * The interrupt is only the SECOND of three protection layers:
   *
-  *   1. Hardware  - the NC contacts are wired in series in the 5 V -> L9110S VM
-  *                  motor supply path, so a limit physically removes motor
-  *                  power even if the MCU is hung. This is the only layer that
-  *                  can claim "the door cannot overrun".
+  *   1. Hardware  - the switch's NC contact is wired in series in the 5 V ->
+  *                  L9110S VM motor supply path, so a limit physically removes
+  *                  motor power even if the MCU is hung. This is the only layer
+  *                  that can claim "the door cannot overrun".
   *   2. Interrupt - this module: fastest possible reaction and event logging.
   *   3. Software  - the state machine's travel timeout in Door.c.
   *
-  * Note the contact sense: NC means the switch conducts while the door is away
-  * from the limit. Tripping the switch OPENS the contact, so the MCU pin is
-  * pulled up by its internal pull-up and reads HIGH. "Triggered" therefore means
-  * "pin high", and any broken wire also reads as triggered - which is the whole
-  * point of using the NC contact.
+  * SENSE (see Limit_Init for the full wiring note)
+  * -----------------------------------------------
+  * The switch is SPDT and BOTH contacts are used, on two electrically separate
+  * circuits: NC carries the 5 V motor supply, NO carries the readback. Readback
+  * is therefore active LOW - the NO contact closes onto GND at the limit:
+  *
+  *   door away from limit : pin HIGH (10k pull-up to 3V3)
+  *   door AT the limit    : pin LOW  (NO contact to GND)
+  *
+  * activeLevel is configured as 0 to match. A broken readback wire now reads
+  * "not at limit" rather than "at limit", so the state machine waits for the 5 s
+  * travel watchdog instead of stopping immediately - the hardware power cut still
+  * protects the mechanism, so the cost is diagnostics rather than safety.
   ******************************************************************************
   */
 

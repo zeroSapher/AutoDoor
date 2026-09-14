@@ -131,9 +131,19 @@ void EXTI0_IRQHandler(void)
 {
     if (EXTI_GetITStatus(EXTI_Line0) != RESET)
     {
-        /* Identify the source before clearing: the debouncer re-reads the pin
-           later anyway, so a wrong guess is self-correcting. */
-        if (GPIO_ReadInputDataBit(LIMIT_OPEN_PORT, LIMIT_OPEN_PIN) != Bit_RESET)
+        /*
+         * Identify the source by reading the pin, and mind the polarity: both
+         * inputs are active LOW, so a LOW pin means the limit has tripped.
+         *
+         *   limit active  -> PA0 low
+         *   sensor active -> PB0 low
+         *
+         * If both were low at once the sensor branch wins, which simply means a
+         * missed edge event; the debouncer re-reads the pin either way, and the
+         * limit LEVEL is what actually stops the door (see Door_Update), so a
+         * wrong guess here is self-correcting rather than dangerous.
+         */
+        if (GPIO_ReadInputDataBit(LIMIT_OPEN_PORT, LIMIT_OPEN_PIN) == Bit_RESET)
         {
             Limit_IrqHandler(1U);
 
@@ -168,7 +178,8 @@ void EXTI1_IRQHandler(void)
 {
     if (EXTI_GetITStatus(EXTI_Line1) != RESET)
     {
-        if (GPIO_ReadInputDataBit(LIMIT_CLOSE_PORT, LIMIT_CLOSE_PIN) != Bit_RESET)
+        /* Active LOW, as on line 0 - see the note in EXTI0_IRQHandler. */
+        if (GPIO_ReadInputDataBit(LIMIT_CLOSE_PORT, LIMIT_CLOSE_PIN) == Bit_RESET)
         {
             Limit_IrqHandler(0U);
             Motor_EmergencyStop();      /* see the note in EXTI0_IRQHandler */

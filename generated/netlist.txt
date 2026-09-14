@@ -1,0 +1,69 @@
+AutoDoor netlist (generated from Core/main.h)
+================================================================
+
+BUZZER
+    PB3    BUZZER           Buzzer drive                 [both]
+
+I2C_SCL
+    PB10   MYI2C_SCL        I2C clock                    [real]
+
+I2C_SDA
+    PB11   MYI2C_SDA        I2C data                     [real]
+
+KEY1
+    PB5    KEY1             Start / stop                 [both]
+
+KEY2
+    PB6    KEY2             Mode toggle                  [both]
+
+KEY3
+    PB7    KEY3             Manual open                  [both]
+
+KEY4
+    PB8    KEY4             Manual close / e-stop        [both]
+
+LCD_D4
+    PB10   LCD1602_D4       1602 data bit 4              [sim]
+
+LCD_D5
+    PB11   LCD1602_D5       1602 data bit 5              [sim]
+
+LCD_D6
+    PB12   LCD1602_D6       1602 data bit 6              [sim]
+
+LCD_D7
+    PB13   LCD1602_D7       1602 data bit 7              [sim]
+
+LCD_EN
+    PB15   LCD1602_EN       1602 enable                  [sim]
+
+LCD_RS
+    PB14   LCD1602_RS       1602 register select         [sim]
+
+LED_STATUS
+    PB4    STATUS_LED       Status LED (state blink)     [both]
+
+LIMIT_CLOSE
+    PA1    LIMIT_CLOSE      Close limit input            [both]
+
+LIMIT_OPEN
+    PA0    LIMIT_OPEN       Open limit input             [both]
+
+MOTOR_IA
+    PA4    MOTOR_IA         L9110S IA                    [both]
+
+MOTOR_IB
+    PA5    MOTOR_IB         L9110S IB                    [both]
+
+SENSOR_IN
+    PB1    SENSOR_IN        Inside presence              [both]
+
+SENSOR_OUT
+    PB0    SENSOR_OUT       Outside presence             [both]
+
+USART1_RX
+    PA10   UART_RX          Console RX                   [both]
+
+USART1_TX
+    PA9    UART_TX          Console TX                   [both]
+
