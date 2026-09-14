@@ -102,6 +102,21 @@ static void on_door_sound(uint8_t pattern)
     Buzzer_Play((BuzzerPattern_t)pattern);
 }
 
+#if defined(AUTODOOR_SIM_BUILD)
+/* The Proteus OLED part may expose a configurable I2C address. Report every
+   responding 7-bit address so an address mismatch is visible on the virtual
+   terminal instead of only appearing as a blank display. */
+static void app_report_i2c_devices(void)
+{
+    /* The Proteus OLED12864I2C model accepts SSD1306 writes but deliberately
+       leaves the ACK bit undriven.  A scan would consequently be meaningless:
+       a strict master sees no devices, while the write-compatible simulation
+       backend sees every probe as successful.  Report its documented address
+       rather than sending 112 destructive probe transactions at boot. */
+    UART_SendString("I2C display  : OLED12864I2C, 7-bit 0x3C (write-only model)\r\n");
+}
+#endif
+
 /*===========================================================================*/
 /*  Periodic tasks                                                           */
 /*===========================================================================*/
@@ -115,6 +130,24 @@ static void on_door_sound(uint8_t pattern)
   */
 static void poll_inputs(void)
 {
+#if defined(AUTODOOR_SIM_BUILD)
+    /*
+     * Proteus-only wiring witness.  This deliberately reads the GPIO register
+     * before the debounce/key layer: if PB5 changes here but no KEY1 message
+     * follows, the fault is in software; if it does not change, the schematic
+     * is not delivering the button contact to the MCU pin.
+     */
+    static uint8_t s_pb5Last = 2U;
+    uint8_t pb5Now = (GPIO_ReadInputDataBit(GPIOB, GPIO_Pin_5) != Bit_RESET) ? 1U : 0U;
+
+    if (pb5Now != s_pb5Last)
+    {
+        s_pb5Last = pb5Now;
+        UART_Printf("[%lu] PB5 raw=%u (%s)\r\n", (unsigned long)g_msTick,
+                    (unsigned)pb5Now, (pb5Now == 0U) ? "pressed" : "released");
+    }
+#endif
+
     /*
      * Raw limit edges are reported but not logged here. The state machine reacts
      * to the limit LEVEL, which is what also handles powering up already sitting
@@ -139,21 +172,33 @@ static void poll_inputs(void)
 
     if (Sensor_TakeOutsideEvent() != 0U)
     {
+#if defined(AUTODOOR_SIM_BUILD)
+        UART_Printf("[%lu] SENSOR outside\r\n", (unsigned long)g_msTick);
+#endif
         Door_NotifyOutsideSensor();
     }
 
     if (Sensor_TakeInsideEvent() != 0U)
     {
+#if defined(AUTODOOR_SIM_BUILD)
+        UART_Printf("[%lu] SENSOR inside\r\n", (unsigned long)g_msTick);
+#endif
         Door_NotifyInsideSensor();
     }
 
     if (Key_TakeShortPress(KEY_ID_START) != 0U)
     {
+#if defined(AUTODOOR_SIM_BUILD)
+        UART_Printf("[%lu] KEY1 start/stop\r\n", (unsigned long)g_msTick);
+#endif
         Door_KeyStartStop();
     }
 
     if (Key_TakeShortPress(KEY_ID_MODE) != 0U)
     {
+#if defined(AUTODOOR_SIM_BUILD)
+        UART_Printf("[%lu] KEY2 mode\r\n", (unsigned long)g_msTick);
+#endif
         Door_KeyToggleMode();
     }
 
@@ -166,6 +211,9 @@ static void poll_inputs(void)
      */
     if (Key_TakeShortPress(KEY_ID_OPEN) != 0U)
     {
+#if defined(AUTODOOR_SIM_BUILD)
+        UART_Printf("[%lu] KEY3 open\r\n", (unsigned long)g_msTick);
+#endif
         if (Display_HandleKey(1U, 0U) == 0U)
         {
             Door_KeyManualOpen();
@@ -174,6 +222,9 @@ static void poll_inputs(void)
 
     if (Key_TakeShortPress(KEY_ID_CLOSE_ESTOP) != 0U)
     {
+#if defined(AUTODOOR_SIM_BUILD)
+        UART_Printf("[%lu] KEY4 close\r\n", (unsigned long)g_msTick);
+#endif
         if (Display_HandleKey(0U, 0U) == 0U)
         {
             Door_KeyManualClose();
@@ -198,6 +249,9 @@ static void poll_inputs(void)
        never be intercepted by navigation. */
     if (Key_TakeLongPress(KEY_ID_CLOSE_ESTOP) != 0U)
     {
+#if defined(AUTODOOR_SIM_BUILD)
+        UART_Printf("[%lu] KEY4 EMERGENCY STOP\r\n", (unsigned long)g_msTick);
+#endif
         Door_EmergencyStop();
     }
 }
@@ -254,6 +308,9 @@ int main(void)
     UART_SendString("========================================\r\n");
     UART_SendString(" AutoDoor  STM32F103C8T6  v1.0\r\n");
     UART_SendString("========================================\r\n");
+#ifdef AUTODOOR_SIM_BUILD
+    UART_SendString(" SIM firmware: PB5-PB8 input diagnostics enabled\r\n");
+#endif
 
     /*
      * Bench builds must be impossible to mistake for real ones. A build without
@@ -292,6 +349,10 @@ int main(void)
     MyI2C_Init();
     UART_Printf("I2C idle      : %s\r\n",
                 (MyI2C_IsIdle() != 0U) ? "yes" : "NO (bus held low)");
+
+#if defined(AUTODOOR_SIM_BUILD)
+    app_report_i2c_devices();
+#endif
 
     Display_Init();
     UART_Printf("Display       : %s\r\n",

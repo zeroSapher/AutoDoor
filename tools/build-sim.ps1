@@ -23,6 +23,11 @@
 .PARAMETER Clean
     Delete the build directory before building.
 
+.PARAMETER NoLimits
+    Bench-only build: simulate door position instead of reading PA0/PA1 limit
+    switches. This is useful while drawing the Proteus schematic, but it removes
+    limit fault detection and must not be used for a real door.
+
 .PARAMETER Toolchain
     Directory holding arm-none-eabi-gcc. Defaults to D:\ST\gcc-arm-none-eabi\bin.
 
@@ -35,6 +40,7 @@
 param(
     [switch]$DebugBuild,
     [switch]$Clean,
+    [switch]$NoLimits,
     [string]$Toolchain
 )
 
@@ -74,7 +80,8 @@ $Size    = Get-Tool 'arm-none-eabi-size'
 $Sources = $BaseSources + $SimBackend
 
 $McFlags  = @('-mcpu=cortex-m3', '-mthumb', '-mfloat-abi=soft')
-$Defines  = $DefineBase + @('-DAUTODOOR_SIM_BUILD=1')
+$LimitsFlag = if ($NoLimits) { @('-DAUTODOOR_NO_LIMITS=1') } else { @() }
+$Defines  = $DefineBase + $LimitsFlag + @('-DAUTODOOR_SIM_BUILD=1')
 $IncFlags = $IncludeDirs | ForEach-Object { "-I$Root/$_" }
 
 $OptFlags = if ($DebugBuild) { @('-Og', '-g3') } else { @('-Os', '-g') }
@@ -88,6 +95,9 @@ $CFlags = $McFlags + $Defines + $IncFlags + @(
 Write-Host 'AutoDoor SIMULATION build (OLED12864 I2C display backend)' -ForegroundColor Cyan
 Write-Host "Toolchain : $Gcc" -ForegroundColor Cyan
 Write-Host "Version   : $((& $Gcc --version | Select-Object -First 1))" -ForegroundColor Cyan
+if ($NoLimits) {
+    Write-Host 'BENCH BUILD: PA0/PA1 are disabled; door position is simulated' -ForegroundColor Magenta
+}
 
 if ($Clean -and (Test-Path $BuildDir)) {
     Write-Host "Cleaning $BuildDir" -ForegroundColor Yellow

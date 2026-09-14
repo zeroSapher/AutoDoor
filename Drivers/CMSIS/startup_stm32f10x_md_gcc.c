@@ -28,6 +28,7 @@ extern uint32_t _sbss;      /* .bss start in RAM                       */
 extern uint32_t _ebss;      /* .bss end in RAM                         */
 
 int main(void);
+void SystemInit(void);
 void Reset_Handler(void);
 void Default_Handler(void);
 
@@ -195,6 +196,12 @@ void Reset_Handler(void)
     {
         *dst = 0U;
     }
+
+    /* Match the ST startup sequence: main.c configures delay and USART1 from
+       SystemCoreClock, so the PLL must be configured before either peripheral
+       is initialised.  Without this call the MCU stays at reset's 8 MHz HSI
+       while the firmware calculates a 72 MHz UART divisor. */
+    SystemInit();
 
     /* Run .init_array constructors. Nothing here needs them today, but it keeps
        the startup correct if C++ or constructor attributes are added later. */

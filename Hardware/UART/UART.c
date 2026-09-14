@@ -167,6 +167,21 @@ void UART_TxIrqHandler(void)
 
 void UART_SendByte(uint8_t byte)
 {
+#if defined(AUTODOOR_SIM_BUILD)
+    /*
+     * Proteus can model the USART data register while failing to dispatch the
+     * TXE interrupt reliably.  The normal firmware uses that interrupt to
+     * drain its TX ring, which makes the very first boot banner fill the ring
+     * and deadlock in a simulator that never raises TXE.  The basic lab image
+     * already demonstrated that polling TXE works in this model, so use it for
+     * the simulation target only.  The real target retains the non-blocking
+     * ring-buffer path below.
+     */
+    USART_SendData(USART1, byte);
+    while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET)
+    {
+    }
+#else
     uint16_t next = (uint16_t)((s_txHead + 1U) & UART_TX_MASK);
 
     /* Wait only when the ring is full; the interrupt is draining it. The wait
@@ -179,6 +194,7 @@ void UART_SendByte(uint8_t byte)
     s_txHead = next;
 
     USART_ITConfig(USART1, USART_IT_TXE, ENABLE);
+#endif
 }
 
 uint16_t UART_TxFree(void)

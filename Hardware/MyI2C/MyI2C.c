@@ -22,6 +22,221 @@
 #include "MyI2C.h"
 #include "main.h"
 #include "Delay.h"
+#include "stm32f10x_i2c.h"
+
+#if defined(AUTODOOR_SIM_BUILD) && defined(AUTODOOR_SIM_HARDWARE_I2C)
+
+/*
+ * Proteus backend
+ * ---------------
+ * The OLED12864I2C model supplied with Proteus is also used by the Arduino
+ * sample project, where the master is a hardware TWI peripheral.  On the F103,
+ * I2C2 is natively routed to the exact two pins used by this project: PB10
+ * (SCL) and PB11 (SDA).  Use it for the simulation image so that the virtual
+ * component sees a peripheral-generated I2C waveform.  The normal firmware
+ * below remains the portable software-I2C implementation.
+ */
+
+#define SIM_I2C                I2C2
+#define SIM_I2C_RCC            RCC_APB1Periph_I2C2
+#define SIM_I2C_WAIT_LOOPS     200000UL
+
+static void sim_i2c_stop(void)
+{
+    I2C_GenerateSTOP(SIM_I2C, ENABLE);
+    I2C_AcknowledgeConfig(SIM_I2C, ENABLE);
+}
+
+static uint8_t sim_i2c_wait_event(uint32_t event)
+{
+    uint32_t guard = SIM_I2C_WAIT_LOOPS;
+
+    while (I2C_CheckEvent(SIM_I2C, event) == ERROR)
+    {
+        if (I2C_GetFlagStatus(SIM_I2C, I2C_FLAG_AF) != RESET)
+        {
+            I2C_ClearFlag(SIM_I2C, I2C_FLAG_AF);
+            return MYI2C_ERR_NACK;
+        }
+        if (guard-- == 0U)
+        {
+            return MYI2C_ERR_TIMEOUT;
+        }
+    }
+    return MYI2C_OK;
+}
+
+static uint8_t sim_i2c_start_address(uint8_t devAddr, uint8_t direction)
+{
+    uint8_t rc;
+
+    I2C_GenerateSTART(SIM_I2C, ENABLE);
+    rc = sim_i2c_wait_event(I2C_EVENT_MASTER_MODE_SELECT);
+    if (rc != MYI2C_OK)
+    {
+        return rc;
+    }
+
+    I2C_Send7bitAddress(SIM_I2C, (uint8_t)(devAddr & 0xFEU), direction);
+    return sim_i2c_wait_event((direction == I2C_Direction_Transmitter)
+                                  ? I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED
+                                  : I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED);
+}
+
+static uint8_t sim_i2c_write_bytes(const uint8_t *buf, uint16_t len)
+{
+    uint16_t i;
+    uint8_t rc;
+
+    for (i = 0U; i < len; i++)
+    {
+        rc = sim_i2c_wait_event(I2C_EVENT_MASTER_BYTE_TRANSMITTING);
+        if (rc != MYI2C_OK)
+        {
+            return rc;
+        }
+        I2C_SendData(SIM_I2C, buf[i]);
+    }
+
+    return sim_i2c_wait_event(I2C_EVENT_MASTER_BYTE_TRANSMITTED);
+}
+
+static uint8_t sim_i2c_read_bytes(uint8_t *buf, uint16_t len)
+{
+    uint16_t i;
+    uint8_t rc;
+
+    if (len == 1U)
+    {
+        I2C_AcknowledgeConfig(SIM_I2C, DISABLE);
+        (void)SIM_I2C->SR2;                 /* clear ADDR after ACK is disabled */
+        I2C_GenerateSTOP(SIM_I2C, ENABLE);
+        rc = sim_i2c_wait_event(I2C_EVENT_MASTER_BYTE_RECEIVED);
+        if (rc == MYI2C_OK)
+        {
+            buf[0] = I2C_ReceiveData(SIM_I2C);
+        }
+        I2C_AcknowledgeConfig(SIM_I2C, ENABLE);
+        return rc;
+    }
+
+    /* Multi-byte reads are only used by the EEPROM.  Read all but the final
+       byte with ACK enabled, then NACK the final byte and stop the transfer. */
+    (void)SIM_I2C->SR2;                     /* clear ADDR; ACK stays enabled */
+    for (i = 0U; i < (uint16_t)(len - 1U); i++)
+    {
+        rc = sim_i2c_wait_event(I2C_EVENT_MASTER_BYTE_RECEIVED);
+        if (rc != MYI2C_OK)
+        {
+            return rc;
+        }
+        buf[i] = I2C_ReceiveData(SIM_I2C);
+    }
+
+    I2C_AcknowledgeConfig(SIM_I2C, DISABLE);
+    I2C_GenerateSTOP(SIM_I2C, ENABLE);
+    rc = sim_i2c_wait_event(I2C_EVENT_MASTER_BYTE_RECEIVED);
+    if (rc == MYI2C_OK)
+    {
+        buf[len - 1U] = I2C_ReceiveData(SIM_I2C);
+    }
+    I2C_AcknowledgeConfig(SIM_I2C, ENABLE);
+    return rc;
+}
+
+void MyI2C_Init(void)
+{
+    GPIO_InitTypeDef gpio;
+    I2C_InitTypeDef i2c;
+
+    RCC_APB2PeriphClockCmd(MYI2C_GPIO_RCC, ENABLE);
+    RCC_APB1PeriphClockCmd(SIM_I2C_RCC, ENABLE);
+
+    gpio.GPIO_Pin = MYI2C_SCL_PIN | MYI2C_SDA_PIN;
+    gpio.GPIO_Speed = GPIO_Speed_50MHz;
+    gpio.GPIO_Mode = GPIO_Mode_AF_OD;
+    GPIO_Init(MYI2C_SCL_PORT, &gpio);
+
+    I2C_DeInit(SIM_I2C);
+    i2c.I2C_Mode = I2C_Mode_I2C;
+    i2c.I2C_DutyCycle = I2C_DutyCycle_2;
+    i2c.I2C_OwnAddress1 = 0U;
+    i2c.I2C_Ack = I2C_Ack_Enable;
+    i2c.I2C_AcknowledgedAddress = I2C_AcknowledgedAddress_7bit;
+    i2c.I2C_ClockSpeed = 100000U;
+    I2C_Init(SIM_I2C, &i2c);
+    I2C_Cmd(SIM_I2C, ENABLE);
+}
+
+uint8_t MyI2C_IsIdle(void)
+{
+    return (I2C_GetFlagStatus(SIM_I2C, I2C_FLAG_BUSY) == RESET) ? 1U : 0U;
+}
+
+uint8_t MyI2C_BusRecover(void)
+{
+    I2C_SoftwareResetCmd(SIM_I2C, ENABLE);
+    I2C_SoftwareResetCmd(SIM_I2C, DISABLE);
+    I2C_Cmd(SIM_I2C, ENABLE);
+    return MYI2C_OK;
+}
+
+void MyI2C_ForceStop(void)
+{
+    sim_i2c_stop();
+}
+
+uint8_t MyI2C_Probe(uint8_t devAddr)
+{
+    uint8_t rc = sim_i2c_start_address(devAddr, I2C_Direction_Transmitter);
+    sim_i2c_stop();
+    return rc;
+}
+
+uint8_t MyI2C_Write(uint8_t devAddr, const uint8_t *buf, uint16_t len)
+{
+    uint8_t rc;
+    if ((buf == 0) || (len == 0U)) return MYI2C_ERR_PARAM;
+    rc = sim_i2c_start_address(devAddr, I2C_Direction_Transmitter);
+    if (rc == MYI2C_OK) rc = sim_i2c_write_bytes(buf, len);
+    sim_i2c_stop();
+    return rc;
+}
+
+uint8_t MyI2C_Read(uint8_t devAddr, uint8_t *buf, uint16_t len)
+{
+    uint8_t rc;
+    if ((buf == 0) || (len == 0U)) return MYI2C_ERR_PARAM;
+    rc = sim_i2c_start_address(devAddr, I2C_Direction_Receiver);
+    if (rc == MYI2C_OK) rc = sim_i2c_read_bytes(buf, len);
+    else sim_i2c_stop();
+    return rc;
+}
+
+uint8_t MyI2C_WriteRead(uint8_t devAddr, const uint8_t *wbuf, uint16_t wlen,
+                         uint8_t *rbuf, uint16_t rlen)
+{
+    uint8_t rc;
+    if ((wbuf == 0) || (wlen == 0U) || (rbuf == 0) || (rlen == 0U)) return MYI2C_ERR_PARAM;
+    rc = sim_i2c_start_address(devAddr, I2C_Direction_Transmitter);
+    if (rc == MYI2C_OK) rc = sim_i2c_write_bytes(wbuf, wlen);
+    if (rc == MYI2C_OK) rc = sim_i2c_start_address(devAddr, I2C_Direction_Receiver);
+    if (rc == MYI2C_OK) rc = sim_i2c_read_bytes(rbuf, rlen);
+    else sim_i2c_stop();
+    return rc;
+}
+
+uint8_t MyI2C_WriteWithPoll(uint8_t devAddr, const uint8_t *buf, uint16_t len,
+                             uint32_t timeoutMs)
+{
+    uint32_t tries = timeoutMs * 10U;
+    uint8_t rc = MyI2C_Write(devAddr, buf, len);
+    if (rc != MYI2C_OK) return rc;
+    do { rc = MyI2C_Probe(devAddr); } while ((rc == MYI2C_ERR_NACK) && (tries-- != 0U));
+    return rc;
+}
+
+#else
 
 /*===========================================================================*/
 /*  Pin access                                                               */
@@ -116,7 +331,8 @@ static uint8_t scl_release(void)
 static void bus_rest(void)
 {
     SDA_HIGH();
-    scl_drive(0U);
+    /* I2C is idle only when both open-drain lines are released high. */
+    scl_drive(1U);
     s_busBusy = 0U;
 }
 
@@ -207,6 +423,14 @@ static uint8_t bus_write_byte(uint8_t byte)
     QDELAY();
 
     ack = (SDA_PIN_READ() == Bit_RESET) ? MYI2C_OK : MYI2C_ERR_NACK;
+
+#if defined(AUTODOOR_SIM_BUILD)
+    /* OLED12864I2C's Proteus model consumes a valid SSD1306 write stream but
+       does not model the slave ACK bit.  The known-good local reference project
+       therefore clocks the ninth bit without sampling it.  Keep strict ACK
+       handling for the real firmware; only the simulation image is write-only. */
+    ack = MYI2C_OK;
+#endif
 
     scl_drive(0U);
     QDELAY();
@@ -575,3 +799,5 @@ uint8_t MyI2C_WriteWithPoll(uint8_t devAddr, const uint8_t *buf, uint16_t len,
         waitedUs += 200U;
     }
 }
+
+#endif /* AUTODOOR_SIM_BUILD */

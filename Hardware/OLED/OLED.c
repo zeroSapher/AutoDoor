@@ -182,7 +182,14 @@ static void OLED_WriteData(uint8_t *Data, uint8_t Count)
   */
 uint8_t OLED_IsConnected(void)
 {
+#if defined(AUTODOOR_SIM_BUILD)
+    /* Proteus OLED12864I2C accepts SSD1306 write frames but does not expose a
+       usable ACK phase, so connection probing would incorrectly reject a panel
+       that will display correctly. */
+    return 1U;
+#else
     return (MyI2C_Probe(OLED_I2C_ADDRESS) == 0U) ? 1U : 0U;
+#endif
 }
 
 /*********************硬件配置*/
