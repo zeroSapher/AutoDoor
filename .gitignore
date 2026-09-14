@@ -1,0 +1,58 @@
+# ===========================================================================
+# Build output - never commit generated firmware.
+#
+# The build directories hold .elf/.hex/.bin/.map plus hundreds of .o files;
+# they were 1.9 MB of a 4.1 MB working tree. Firmware images are rebuilt from
+# source by any of the three build paths, so committing them would only add
+# noise and (worse) invite flashing a stale image.
+# ===========================================================================
+build/
+build-sim/
+build-test/
+Build/
+BuildMCP/
+
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.su
+*.lst
+
+# ===========================================================================
+# Keil MDK intermediates
+# ===========================================================================
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+MDK-ARM/DebugConfig/
+MDK-ARM/RTE/
+*.uvguix.*
+*.uvoptx
+*.bak
+*.dep
+*.crf
+*.lnp
+*.iex
+*.htm
+*.build_log.htm
+*.scvd
+JLinkLog.txt
+keilkill.bat
+
+# ===========================================================================
+# Editor / OS
+# ===========================================================================
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+
+# ===========================================================================
+# Python (tools/gen-hardware.py generates hardware/ artifacts)
+# ===========================================================================
+__pycache__/
+*.pyc
