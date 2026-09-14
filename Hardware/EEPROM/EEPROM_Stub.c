@@ -5,8 +5,9 @@
   *
   * WHY THIS EXISTS
   * ---------------
-  * In the Proteus simulation the 1602 display claims PB10/PB11, which are the
-  * I2C bus pins, so there is nowhere to attach the AT24C32. Rather than let the
+ * In the Proteus simulation the 1602 display uses the simulation-only LCD pins,
+ * but the EEPROM is intentionally omitted so the build exercises the
+ * no-persistence path. Rather than let the
   * link fail on missing EEPROM_* symbols, or fake a working EEPROM (which would
   * let the simulation claim a persistence feature it never tested), this stub
   * reports "device absent" for every call.

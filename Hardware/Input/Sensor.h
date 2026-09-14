@@ -4,11 +4,10 @@
   * @brief   Presence detection at the door - outside (entering) and inside
   *          (leaving).
   *
-  * CURRENT IMPLEMENTATION
+  * CURRENT IMPLEMENTATION: KEY SIMULATION
   * ----------------------
-  * Presence is simulated with two push buttons, because the available parts list
-  * contains no sensor that can actually detect a person: the TCRT5000 in it is a
-  * ~1 cm reflective line sensor and is useless at door range.
+   * Presence is simulated with two key switches on PB12/PB13. The available
+   * TCRT5000 is not suitable for detecting a person at door range.
   *
   * This is an interface-compatible substitution, not a throwaway stub. A real
   * E18-D80NK optical sensor and a button are both "active-low signal into an EXTI

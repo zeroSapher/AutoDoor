@@ -40,6 +40,7 @@ param(
     [switch]$Clean,
     [switch]$Flash,
     [switch]$Erase,
+    [switch]$NoLimits,
     [string]$Toolchain
 )
 
@@ -101,11 +102,21 @@ $IncFlags = $IncludeDirs | ForEach-Object { "-I$Root/$_" }
 
 $OptFlags = if ($DebugBuild) { @('-Og', '-g3') } else { @('-Os', '-g') }
 
-$CFlags = $McFlags + $DefineBase + $IncFlags + @(
+# Bench mode: build without limit switches fitted. The firmware simulates the
+# door position instead of reading PA0/PA1. See the note in Core/main.h for what
+# that removes - in short, there is no software fast-stop and no limit fault
+# detection, and the only overrun protection left is the hardware NC contact.
+$LimitsFlag = if ($NoLimits) { @('-DAUTODOOR_NO_LIMITS=1') } else { @() }
+
+$CFlags = $McFlags + $DefineBase + $LimitsFlag + $IncFlags + @(
     '-Wall', '-Wextra', '-Wshadow', '-Wdouble-promotion'
 ) + $OptFlags + @(
     '-ffunction-sections', '-fdata-sections', '-std=gnu11'
 )
+
+if ($NoLimits) {
+    Write-Host 'BENCH BUILD: limit switches disabled, position is simulated' -ForegroundColor Magenta
+}
 
 # ---------------------------------------------------------------------------
 # Build

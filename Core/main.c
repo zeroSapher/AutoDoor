@@ -256,6 +256,22 @@ int main(void)
     UART_SendString("========================================\r\n");
 
     /*
+     * Bench builds must be impossible to mistake for real ones. A build without
+     * limit switches has no software fast-stop layer and cannot detect a broken
+     * limit line, so it says so on every boot, before anything else.
+     */
+    if (Limit_IsSimulated() != 0U)
+    {
+        UART_SendString("*** BENCH BUILD: LIMIT SWITCHES DISABLED ***\r\n");
+        UART_SendString("*** position is SIMULATED from motor direction            ***\r\n");
+        UART_SendString("*** no limit EXTI, no limit fault detection              ***\r\n");
+        UART_SendString("*** the only overrun protection left is the hardware NC  ***\r\n");
+        UART_SendString("*** contact in the +5V -> VM path - IF IT IS WIRED       ***\r\n");
+        UART_SendString("*** never ship this build                                ***\r\n");
+        UART_SendLine();
+    }
+
+    /*
      * Report EXTI line conflicts. The input modules are initialised before the
      * console exists, so Exti_ConfigPin() cannot print; it counts instead. A
      * non-zero count means two inputs share a pin NUMBER, which on STM32F1 means
@@ -317,9 +333,18 @@ int main(void)
     }
 
     /* ---- 9. Limit levels as latched at start-up ------------------------- */
-    UART_Printf("Limits        : open=%u closed=%u%s\r\n",
-                (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed(),
-                (Limit_IsFaulted() != 0U) ? "  <-- BOTH ASSERTED (wiring fault)" : "");
+    if (Limit_IsSimulated() != 0U)
+    {
+        UART_Printf("Limits        : *** SIMULATED *** (open=%u closed=%u, %ums travel)\r\n",
+                    (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed(),
+                    (unsigned)DOOR_SIM_TRAVEL_MS);
+    }
+    else
+    {
+        UART_Printf("Limits        : open=%u closed=%u%s\r\n",
+                    (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed(),
+                    (Limit_IsFaulted() != 0U) ? "  <-- BOTH ASSERTED (wiring fault)" : "");
+    }
 
     /* ---- 10. State machine ---------------------------------------------- */
     hooks.OnEvent       = on_door_event;

@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    Sensor.c
-  * @brief   Presence detection at the door (currently button-simulated).
+    * @brief   Presence detection simulated by two key switches.
   ******************************************************************************
   */
 
@@ -19,8 +19,7 @@ void Sensor_Init(void)
 
     RCC_APB2PeriphClockCmd(SENSOR_RCC, ENABLE);
 
-    /* Active low into a pull-up: pressing the button (or a future optical
-       sensor pulling its open-collector output down) asserts the input. */
+    /* Active low into a pull-up: pressing the simulation switch asserts input. */
     GPIO_InitStructure.GPIO_Pin  = SENSOR_OUT_PIN | SENSOR_IN_PIN;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init(SENSOR_OUT_PORT, &GPIO_InitStructure);

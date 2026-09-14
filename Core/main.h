@@ -183,16 +183,57 @@ extern "C" {
 #define LIMIT_DEBOUNCE_MS       25U
 
 /*===========================================================================*/
-/*  Simulated presence sensors (buttons today, E18-D80NK later)              */
+/*  BENCH MODE: run without limit switches fitted                            */
 /*===========================================================================*/
 /*
- * The parts list has no sensor that can detect a person (the TCRT5000 in it is
- * a ~1 cm reflective line sensor, useless at door range), so presence is
- * simulated with two push buttons for now.
+ * Default 0 = real limit switches. Override from the command line:
  *
- * This is a clean substitution rather than a throwaway hack: a button and a
- * real IR/optical sensor are both "active-low edge into an EXTI line plus
- * debounce", so swapping in an E18-D80NK later changes only these macros.
+ *     .\tools\build.ps1 -NoLimits -Flash
+ *
+ * Set to 1, Hardware/Limit.c stops touching PA0/PA1 and instead SIMULATES the
+ * door position from the motor direction and elapsed travel, finishing in
+ * DOOR_SIM_TRAVEL_MS. Everything above it - the state machine, both settle paths,
+ * the travel watchdog, the auto-close countdown, the reversal net - runs
+ * unchanged, which is the only reason a bench test is worth anything.
+ *
+ * DELETING THE LIMIT CODE WAS THE OBVIOUS READING AND IT DOES NOT WORK: if the
+ * limit reads simply report "not at limit", the state machine never settles, and
+ * every move ends in FAULT_OPEN_TIMEOUT / FAULT_CLOSE_TIMEOUT after
+ * DOOR_TRAVEL_TIMEOUT_MS. The door works for five seconds and then latches a
+ * fault, which tests nothing. Substituting the feedback is what makes a rig
+ * without switches testable at all.
+ *
+ * WHAT THIS MODE REMOVES - it is not a smaller version of the real thing:
+ *   - the limit EXTI handlers are unreachable, so the software fast-stop layer
+ *     does not exist. The ONLY thing between a runaway motor and the mechanism
+ *     is the NC contact in the +5V -> VM path, and that is hardware: it still
+ *     works, but only if it is actually wired;
+ *   - a shorted or broken limit line cannot be detected (Limit_IsFaulted() is
+ *     forced healthy);
+ *   - the simulated travel time is a guess, so "arrived" and the watchdog margins
+ *     are not the real ones.
+ *
+ * Never ship a build with this set. The boot banner, STATUS?, and
+ * docs/上电调试步骤.md all say so.
+ */
+#ifndef AUTODOOR_NO_LIMITS
+#define AUTODOOR_NO_LIMITS      0
+#endif
+
+/* End-to-end simulated travel, in milliseconds. Must stay comfortably below
+   DOOR_TRAVEL_TIMEOUT_MS or the watchdog wins the race and faults every move. */
+#define DOOR_SIM_TRAVEL_MS      2000U
+
+/*===========================================================================*/
+/*  Presence sensors simulated by keys on this branch                       */
+/*===========================================================================*/
+/*
+ * This branch does not use a real presence sensor. Two panel switches on PB12
+ * and PB13 simulate the outside and inside detection events.
+ *
+ * The application still consumes semantic sensor events, so the simulation
+ * input can later be replaced by an active-low optical sensor without changing
+ * the door state machine.
  *
  * PIN CHOICE - this is an EXTI decision, not a convenience one.
  *
@@ -219,9 +260,9 @@ extern "C" {
  */
 #define SENSOR_RCC              RCC_APB2Periph_GPIOB
 #define SENSOR_OUT_PORT         GPIOB
-#define SENSOR_OUT_PIN          GPIO_Pin_12   /* EXTI12 - outside, someone entering */
+#define SENSOR_OUT_PIN          GPIO_Pin_12   /* KEY-simulated outside detection */
 #define SENSOR_IN_PORT          GPIOB
-#define SENSOR_IN_PIN           GPIO_Pin_13   /* EXTI13 - inside, someone leaving   */
+#define SENSOR_IN_PIN           GPIO_Pin_13   /* KEY-simulated inside detection  */
 #define SENSOR_DEBOUNCE_MS      20U
 
 /*===========================================================================*/

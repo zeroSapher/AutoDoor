@@ -40,6 +40,21 @@
 #include "stm32f10x.h"
 #include <stdint.h>
 
+/*
+ * BENCH MODE
+ * ----------
+ * With AUTODOOR_NO_LIMITS set (see Core/main.h), every function below keeps its
+ * contract but reads a simulated door position instead of the pins. The API is
+ * deliberately unchanged, so Door.c needs no conditional compilation at all: the
+ * state machine cannot tell the difference, which is what makes the bench test
+ * meaningful.
+ *
+ * What changes in that mode: no pin is configured, no EXTI line is claimed,
+ * Limit_IrqHandler() is unreachable, and Limit_IsFaulted() always reports healthy.
+ * The hardware NC layer is unaffected - it does not involve the MCU - but it only
+ * protects the mechanism if it is actually wired.
+ */
+
 /** @brief Configure both limit pins as EXTI inputs with the top priority. */
 void Limit_Init(void);
 
@@ -75,7 +90,13 @@ uint8_t Limit_IsOpen(void);
 uint8_t Limit_IsClosed(void);
 
 /** @return 1 when both limits read triggered at once, which is impossible for
-  *          a real mechanism and therefore indicates a wiring or sensor fault. */
+  *          a real mechanism and therefore indicates a wiring or sensor fault.
+  *          Always 0 in bench mode - see the note above. */
 uint8_t Limit_IsFaulted(void);
+
+/** @return 1 when the position came from the bench-mode simulation rather than
+  *          from real switches. Used by the boot banner and STATUS? so an
+  *          unsafe build cannot be mistaken for a normal one. */
+uint8_t Limit_IsSimulated(void);
 
 #endif /* __LIMIT_H */
