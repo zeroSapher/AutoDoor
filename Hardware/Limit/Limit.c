@@ -152,13 +152,26 @@ void Limit_Reset(void)
 #endif
 }
 
-void Limit_IrqHandler(uint8_t openEdge)
+uint8_t Limit_IrqHandler(uint8_t openEdge)
 {
 #if AUTODOOR_NO_LIMITS
     /* No EXTI line is claimed in this mode, so this cannot be reached. It stays
        compiled so that turning the switch off needs no other change. */
     (void)openEdge;
+    return 0U;
 #else
+    GPIO_TypeDef *port = openEdge ? LIMIT_OPEN_PORT  : LIMIT_CLOSE_PORT;
+    uint16_t      pin  = openEdge ? LIMIT_OPEN_PIN   : LIMIT_CLOSE_PIN;
+
+    /*
+     * The direction in which the motor is driving AWAY from this switch - i.e.
+     * the one direction in which this edge must NOT be treated as "stop now".
+     *
+     *   open limit  : reached by driving OPEN,  so departing means driving CLOSE
+     *   close limit : reached by driving CLOSE, so departing means driving OPEN
+     */
+    MotorDir_t away = openEdge ? MOTOR_DIR_CLOSE : MOTOR_DIR_OPEN;
+
     if (openEdge != 0U)
     {
         Debounce_IrqEdge(&s_open);
@@ -167,6 +180,47 @@ void Limit_IrqHandler(uint8_t openEdge)
     {
         Debounce_IrqEdge(&s_close);
     }
+
+    /*
+     * THE DECISION LIVES HERE, NOT IN THE ISR - and that is a fix, not a
+     * preference. It used to sit in stm32f10x_it.c as a bare
+     * `Motor_EmergencyStop()` call, and this module's EXTI lines are configured
+     * Rising_Falling, so ANY edge cut the motor. That included the RELEASE edge
+     * when the door started moving away from a limit - so the door moved a few
+     * millimetres off the switch, the motor was cut, nothing restarted it
+     * (only begin_open/begin_close call Motor_Run), and five seconds later the
+     * travel watchdog latched FAULT_*_TIMEOUT. The default build could not open
+     * or close the door at all.
+     *
+     * The guard that got removed when the ISRs were simplified had been doing two
+     * jobs, and only one of them was obvious: it disambiguated PA0 from PB0 (which
+     * did become unnecessary once the pins got distinct EXTI lines) AND it
+     * restricted the cut to the ASSERT edge. Removing it took the second job with
+     * it. Keeping the decision next to the polarity constants it depends on makes
+     * that harder to repeat: the ISR now has nothing to get wrong.
+     *
+     * The level test is on the RAW pin, not the debounced level - the whole point
+     * of doing this in the interrupt is to act before the main loop can.
+     */
+    if ((GPIO_ReadInputDataBit(port, pin) == Bit_RESET) &&      /* asserted */
+        (Motor_GetDir() != away))                              /* not departing */
+    {
+        /*
+         * Cut unless the motor is deliberately driving AWAY from this switch.
+         *
+         * "Not departing" rather than "arriving" on purpose: with the motor
+         * stopped (STOP or BRAKE) the cut is a harmless no-op, and during
+         * Motor_Run()'s reversal dead time s_dir is momentarily STOP - treating
+         * that as "not arriving" would open a window where a limit asserts and
+         * nothing cuts. The only case excluded is the one that caused the bug:
+         * driving away, where a contact bounce can dip the pin low again and
+         * would otherwise re-trigger the cut for the whole departure.
+         */
+        Motor_EmergencyStop();
+        return 1U;
+    }
+
+    return 0U;
 #endif
 }
 

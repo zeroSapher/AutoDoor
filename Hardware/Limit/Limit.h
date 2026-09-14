@@ -71,13 +71,20 @@ void Limit_Reset(void);
 void Limit_Tick1ms(void);
 
 /**
-  * @brief  EXTIM-based edge capture.
+  * @brief  Limit edge captured by EXTI - and the only place the motor is cut.
   * @param  openEdge  1 when the interrupt was on the "door open" limit line.
-  * @note   Called from the EXTI0/EXTI1 handlers in Core/stm32f10x_it.c.
-  *         Deliberately does nothing but timestamp the edge - an ISR must be
-  *         short, and the pin is left to be re-read after the debounce window.
+  * @return 1 when this edge cut the motor, 0 otherwise.
+  * @note   Called from the EXTI0/EXTI1 handlers in Core/stm32f10x_it.c, which do
+  *         nothing else: the decision to stop belongs here, beside the polarity
+  *         it depends on.
+  * @note   A limit line is configured Rising_Falling, so this is entered on BOTH
+  *         edges. Only the ASSERT edge (pin low) may cut the motor, and only when
+  *         the motor is not already driving away from that switch. Cutting on the
+  *         release edge stranded the door a few millimetres off the switch, with
+  *         nothing to restart the motor - the whole reason this logic is here
+  *         rather than inline in the handler.
   */
-void Limit_IrqHandler(uint8_t openEdge);
+uint8_t Limit_IrqHandler(uint8_t openEdge);
 
 /** @return 1 exactly once when the "door open" limit has newly triggered. */
 uint8_t Limit_TakeOpenEvent(void);

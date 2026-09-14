@@ -150,8 +150,8 @@ void USART1_IRQHandler(void)
   *         EXTI line 0. That could never have worked: AFIO routes exactly one
   *         port to a line, so whichever module called Exti_ConfigPin() last took
   *         the line - and since Sensor_Init() runs after Limit_Init(), it was
-  *         always the sensor. The limit switch had no interrupt at all, and every
-  *         Motor_EmergencyStop() below was unreachable by the limit. Reading the
+  *         always the sensor. The limit switch had no interrupt at all, so the
+  *         motor-cut call the design relied on was unreachable code. Reading the
   *         pin to guess the source was therefore not "self-correcting", it was
   *         guessing about an interrupt that could not have come from there.
   *
@@ -162,22 +162,27 @@ void EXTI0_IRQHandler(void)
 {
     if (EXTI_GetITStatus(EXTI_Line0) != RESET)
     {
-        Limit_IrqHandler(1U);
-
         /*
-         * Cut the motor HERE, not in the main loop.
+         * Limit_IrqHandler() both starts the debounce window AND decides whether
+         * to cut the motor. That decision deliberately lives in Hardware/Limit.c
+         * rather than here:
          *
-         * The state machine can be blocked when this fires - Motor_Stop() ramps
-         * the duty down with Delay_ms(), the panel refresh spends ~140 ms on the
-         * I2C bus, and a log dump used to spend seconds there. Waiting for the
-         * loop would mean the motor keeps driving into the end stop for the whole
-         * of that time. Motor_EmergencyStop() is two GPIO writes with no delay,
-         * so it is safe from interrupt context.
+         *   - the line is configured Rising_Falling, so this fires on the RELEASE
+         *     edge too, and only the assert edge may cut the motor. A bare
+         *     Motor_EmergencyStop() here cut the motor as the door left the
+         *     switch, which stranded it a few millimetres off the limit with
+         *     nothing to restart it - the default build could not open or close
+         *     the door at all;
+         *   - the assert condition depends on the active level, which Limit.c
+         *     owns (activeLevel 0), so duplicating it here is how the two drift.
          *
-         * The hardware NC contact already removes motor power as the outer
-         * layer; this is the fast electronic layer inside it.
+         * The cut is still immediate - two GPIO writes, no delay, safe from
+         * interrupt context - which is the point of doing it on this path at all:
+         * the main loop can be blocked in Motor_Stop()'s ramp, in the ~140 ms
+         * panel refresh, or in an EEPROM write. The hardware NC contact is the
+         * outer layer; this is the fast electronic layer inside it.
          */
-        Motor_EmergencyStop();
+        (void)Limit_IrqHandler(1U);
 
         EXTI_ClearITPendingBit(EXTI_Line0);
     }
@@ -185,15 +190,14 @@ void EXTI0_IRQHandler(void)
 
 /**
   * @brief  EXTI line 1 - the close limit switch (PA1), and nothing else.
-  * @note   See the note in EXTI0_IRQHandler for why this no longer tries to
-  *         serve the inside sensor as well.
+  * @note   See the note in EXTI0_IRQHandler for why the motor-cut decision is not
+  *         made here.
   */
 void EXTI1_IRQHandler(void)
 {
     if (EXTI_GetITStatus(EXTI_Line1) != RESET)
     {
-        Limit_IrqHandler(0U);
-        Motor_EmergencyStop();      /* see the note in EXTI0_IRQHandler */
+        (void)Limit_IrqHandler(0U);
 
         EXTI_ClearITPendingBit(EXTI_Line1);
     }
