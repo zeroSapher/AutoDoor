@@ -1,17 +1,18 @@
 /**
   ******************************************************************************
   * @file    UART.h
-  * @brief   USART1 serial driver: interrupt-driven RX ring buffer, blocking TX.
+  * @brief   USART1 serial driver: interrupt-driven RX and TX ring buffers.
   *
   * Design notes:
-  *   - Reception is interrupt driven into a ring buffer, so no incoming byte is
-  *     lost while the application is busy drawing to the OLED or sampling the
-  *     DHT11 (which blocks for ~20 ms per read).
-  *   - Transmission is blocking and length-based. Blocking TX keeps the code
-  *     simple and makes the printf retarget below trivially safe; at 115200
-  *     baud a 64-byte line costs well under a millisecond.
-  *   - The ring buffer size must be a power of two (see UART_RX_BUFFER_SIZE in
-  *     Core/main.h): indices are wrapped with a mask instead of a modulo.
+  *   - Both directions are interrupt driven into ring buffers.
+  *   - Reception was always buffered so that no incoming byte is lost while the
+  *     application is busy with the OLED or the EEPROM.
+  *   - Transmission is buffered as well, but for LATENCY, not throughput: while
+  *     TX was a busy-wait, printing a long listing made the caller - the main
+  *     loop - spend the entire transmission spinning on TXE, so the door state
+  *     machine stopped for the duration. See UART_TxFree().
+  *   - Both ring sizes must be powers of two (see Core/main.h): indices are
+  *     wrapped with a mask instead of a modulo.
   ******************************************************************************
   */
 
@@ -32,9 +33,25 @@ void UART_Init(void);
   */
 void UART_IrqHandler(void);
 
+/**
+  * @brief  Refill the transmit register from the TX ring.
+  * @note   Called from USART1_IRQHandler() when TXE is set and the TXE interrupt
+  *         is enabled. Disables that interrupt once the ring is empty, so it is
+  *         not entered when there is nothing to send.
+  */
+void UART_TxIrqHandler(void);
+
 /* ---- Transmit ------------------------------------------------------------ */
 
+/**
+  * @brief  Queue one byte for transmission.
+  * @note   Normally non-blocking. It waits only when the TX ring is completely
+  *         full, i.e. for at most the time it takes the interrupt to drain
+  *         UART_TX_BUFFER_SIZE bytes. Callers that emit long output should check
+  *         UART_TxFree() first and defer instead of waiting.
+  */
 void UART_SendByte(uint8_t byte);
+
 void UART_SendBytes(const uint8_t *data, uint16_t len);
 void UART_SendString(const char *str);
 
@@ -46,9 +63,15 @@ void UART_SendString(const char *str);
   */
 void UART_Printf(const char *format, ...);
 
-/** Blocking TX helpers - convenient for human-readable console output. */
-void UART_SendLine(void);                       /**< send "\r\n"               */
-void UART_NewLine(void);                        /**< alias of UART_SendLine()  */
+/** Send "\r\n" (and UART_NewLine(), an alias kept for older call sites). */
+void UART_SendLine(void);
+void UART_NewLine(void);
+
+/** @return Free space in the TX ring, in bytes. */
+uint16_t UART_TxFree(void);
+
+/** @return Bytes queued but not yet handed to the shift register. */
+uint16_t UART_TxPending(void);
 
 /* ---- Receive ------------------------------------------------------------- */
 

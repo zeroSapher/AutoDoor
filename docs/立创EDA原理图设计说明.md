@@ -216,11 +216,19 @@ KW12-3 的脚位定义**不同批次可能不一致**。上电前用万用表通
 | SW5 | `KEY2`（PB6） | 切换模式 | R5 | C19 |
 | SW6 | `KEY3`（PB7） | 手动开门 / 日志上翻 | R6 | C20 |
 | SW7 | `KEY4`（PB8） | 手动关门 / 长按急停 | R7 | C21 |
-| SW8 | `SENSOR_OUT`（PB0） | 模拟门外红外（进门） | R8 | C22 |
-| SW9 | `SENSOR_IN`（PB1） | 模拟门内红外（出门） | R9 | C23 |
+| SW8 | `SENSOR_OUT`（**PB12**） | 模拟门外红外（进门） | R8 | C22 |
+| SW9 | `SENSOR_IN`（**PB13**） | 模拟门内红外（出门） | R9 | C23 |
 
-> **EXTI 编号约束**：这 6 个引脚占 EXTI5–8 与 EXTI0–1，编号各不相同，无冲突。
-> 若改引脚，**必须保证编号不重复**（F1 上 PA0/PB0/PC0 共用 EXTI0）。
+> **EXTI 编号约束**：这 8 个输入引脚必须占 **8 个互不相同的编号**。
+> 当前是 `PA0/PA1`（限位）→ EXTI0/1、`PB5…PB8`（按键）→ EXTI5–8、
+> `PB12/PB13`（传感器）→ EXTI12/13，互不重复 ✅。
+>
+> ⚠️ **传感器原来接 PB0/PB1，已经改掉。** 原因是 STM32F1 的 EXTI 线按**引脚编号**共用，
+> 而 AFIO 每条线**只能选一个端口**：`Limit_Init()` 先占 EXTI0/EXTI1，`Sensor_Init()`
+> 后跑、把两条线都抢走，于是**限位一个中断都没有**，而且全程没有任何报错。
+> 现在 `main.h` 里有编译期断言，重复编号会直接编译失败；`Exti_ConfigPin()`
+> 也会拒绝把已有线改映射到别的端口并在上电时打印冲突计数。
+> **改引脚时不要绕过这两道检查。**
 
 ### 4.2 蜂鸣器
 
@@ -302,8 +310,8 @@ KW12-3 的脚位定义**不同批次可能不一致**。上电前用万用表通
 |---|---|---|
 | `LIMIT_OPEN` | PA0 | `LIMIT_OPEN_PIN` |
 | `LIMIT_CLOSE` | PA1 | `LIMIT_CLOSE_PIN` |
-| `SENSOR_OUT` | PB0 | `SENSOR_OUT_PIN` |
-| `SENSOR_IN` | PB1 | `SENSOR_IN_PIN` |
+| `SENSOR_OUT` | **PB12** | `SENSOR_OUT_PIN` |
+| `SENSOR_IN` | **PB13** | `SENSOR_IN_PIN` |
 | `BUZZER` | PB3 | `BUZZER_PIN` |
 | `MOTOR_IA` | PA4 | `MOTOR_IA_PIN` |
 | `MOTOR_IB` | PA5 | `MOTOR_IB_PIN` |

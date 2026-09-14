@@ -20,11 +20,18 @@
   *
   * WIRING (see Core/main.h for the macros)
   *   OLED SCL/SDA  PB10/PB11      EEPROM shares the same bus
-  *   open limit    PA0   (EXTI0)  close limit  PA1 (EXTI1)
-  *   sensor out    PB0   (EXTI0)  sensor in    PB1 (EXTI1)
+  *   open limit    PA0   (EXTI0)  close limit  PA1   (EXTI1)
+  *   sensor out    PB12  (EXTI12) sensor in    PB13  (EXTI13)
   *   keys          PB5..PB8 (EXTI5..8)
   *   buzzer        PB3            motor IA/IB  PA4/PA5 -> L9110S
   *   console       PA9/PA10 (USART1, 115200 8N1)
+  *
+  * Those eight EXTI inputs sit on eight DISTINCT pin numbers, which Core/main.h
+  * enforces at compile time and Exti_ConfigPin() at run time. It is not a style
+  * preference: AFIO routes one port per line, so two inputs on one number means
+  * the later initialiser takes the line and the earlier one silently has no
+  * interrupt. The sensors were on PB0/PB1 until round 11, and the limit switches
+  * had no interrupt at all because of it.
   ******************************************************************************
   */
 
@@ -38,6 +45,7 @@
 #include "Limit.h"
 #include "Sensor.h"
 #include "Key.h"
+#include "Exti.h"       /* Exti_ConflictCount() - the boot-time EXTI warning */
 #include "Buzzer.h"
 #include "StatusLed.h"
 #include "Door.h"
@@ -247,9 +255,25 @@ int main(void)
     UART_SendString(" AutoDoor  STM32F103C8T6  v1.0\r\n");
     UART_SendString("========================================\r\n");
 
+    /*
+     * Report EXTI line conflicts. The input modules are initialised before the
+     * console exists, so Exti_ConfigPin() cannot print; it counts instead. A
+     * non-zero count means two inputs share a pin NUMBER, which on STM32F1 means
+     * the later one took the line and the earlier one has NO interrupt - silently,
+     * because AFIO gives no error. That is exactly how the limit switches lost
+     * their interrupt. This line is the only runtime warning of it; the cheaper
+     * guard is the compile-time check in Core/main.h, so seeing this message means
+     * the pin map was changed without that check being updated too.
+     */
+    if (Exti_ConflictCount() != 0U)
+    {
+        UART_Printf("EXTI          : %u LINE CONFLICT(S) - an input has no interrupt!\r\n",
+                    (unsigned)Exti_ConflictCount());
+        UART_SendString("                (two inputs share a pin number; see Core/main.h)\r\n");
+    }
+
     /* ---- 7. I2C bus and devices ----------------------------------------- */
     MyI2C_Init();
-
     UART_Printf("I2C idle      : %s\r\n",
                 (MyI2C_IsIdle() != 0U) ? "yes" : "NO (bus held low)");
 
@@ -335,6 +359,14 @@ int main(void)
         Cmd_Process();
 
         /*
+         * Emit the next slice of a log listing. This must be its own call rather
+         * than part of Cmd_Process(): a dump is served over many iterations, and
+         * the whole point is that the loop keeps running between slices. See the
+         * note in Cmd.h.
+         */
+        Cmd_ProcessLogDump();
+
+        /*
          * Service the event log. All EEPROM traffic lives here and not in the
          * tick handler: a flush is tens of milliseconds of blocking I2C, and
          * doing it inside SysTick stalled the UART and could interleave a second
@@ -342,8 +374,16 @@ int main(void)
          * sets a request flag. It runs after Cmd_Process() so a LOG? command's
          * own flush is not repeated here, and before the panel refresh so the
          * record count shown is the one that was just persisted.
+         *
+         * Suppressed while a listing is being emitted: Log_Get() addresses records
+         * by relative index, and a flush advances wrIndex, which would shift every
+         * index the listing is walking. Events keep queueing in RAM meanwhile and
+         * are written as soon as the listing finishes.
          */
-        Log_Process();
+        if (Cmd_LogDumpActive() == 0U)
+        {
+            Log_Process();
+        }
 
         /*
          * Refresh the panel a few times a second, not every iteration. A full

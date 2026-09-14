@@ -1,11 +1,18 @@
 /**
   ******************************************************************************
   * @file    Exti.c
-  * @brief   Shared EXTI line configuration.
+  * @brief   Shared EXTI line configuration, with a conflict detector.
   ******************************************************************************
   */
 
 #include "Exti.h"
+
+/* Which port each line was routed to, and whether it has been claimed. AFIO can
+   select exactly one port per line, so a second claim for a different port is
+   not a reconfiguration - it is a silent theft of the line. */
+static uint8_t s_lineSource[16];
+static uint8_t s_lineClaimed[16];
+static uint8_t s_conflicts = 0U;
 
 /* Map a GPIO port pointer to the 4-bit port source code used by AFIO_EXTICR. */
 static uint8_t port_source(GPIO_TypeDef *port)
@@ -78,6 +85,27 @@ uint8_t Exti_ConfigPin(GPIO_TypeDef *port, uint16_t pin, EXTITrigger_TypeDef tri
        enabled here rather than by each caller. */
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
 
+    /*
+     * Refuse to take a line that already belongs to a different port.
+     *
+     * This is the check that was missing when PA0 and PB0 both asked for EXTI0:
+     * the second call simply overwrote AFIO_EXTICR, so the limit switch lost its
+     * interrupt with no diagnostic anywhere. A conflict is a pin-map bug, and the
+     * input modules are initialised before the console exists, so it cannot be
+     * reported here - it is counted and main() prints it once the UART is up.
+     *
+     * Re-claiming the SAME port is allowed: it is a harmless reconfiguration of
+     * the trigger and priority.
+     */
+    if ((s_lineClaimed[line] != 0U) && (s_lineSource[line] != src))
+    {
+        s_conflicts++;
+        return 4U;
+    }
+
+    s_lineClaimed[line] = 1U;
+    s_lineSource[line]  = src;
+
     /* AFIO_EXTICR[x] holds four 4-bit port selectors, one per EXTI line. */
     reg   = (uint8_t)(line / 4U);
     shift = (uint8_t)((line % 4U) * 4U);
@@ -103,4 +131,9 @@ uint8_t Exti_ConfigPin(GPIO_TypeDef *port, uint16_t pin, EXTITrigger_TypeDef tri
     NVIC_Init(&NVIC_InitStructure);
 
     return 0U;
+}
+
+uint8_t Exti_ConflictCount(void)
+{
+    return s_conflicts;
 }

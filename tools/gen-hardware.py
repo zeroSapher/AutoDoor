@@ -25,8 +25,13 @@ WHAT IT CHECKS
   4. External-interface nets (motor, limits, buttons, console, power) are present
      in full, because a missing one means a missing connector.
 
-The deliberate I2C/LCD overlap on PB10/PB11 is declared with build variants so it
-is reported as intentional rather than as a collision.
+Build variants (REAL / SIM / BOTH) let one pin carry different nets in the two
+builds. That mechanism used to be needed for a real overlap: the simulation's
+1602 LCD sat on PB10/PB11, the I2C pins. The 1602 has since moved to port A pins
+that are free in both builds, so no overlap remains - but the variant machinery
+stays, and any REAL-only net sharing a pin with a SIM-only net is still reported
+as intentional rather than as a collision. Bringing one back is a decision, not
+an accident, and the report says so.
 
 Usage:
     python tools/gen-hardware.py            # check, and write the artifacts
@@ -57,7 +62,7 @@ OUT_DIR = os.path.join(ROOT, "generated")
 # Build variants
 # ---------------------------------------------------------------------------
 # REAL : the physical board
-# SIM  : the Proteus simulation, where a 1602 LCD takes over PB10..PB15
+# SIM  : the Proteus simulation, where a 1602 LCD replaces the OLED
 REAL = "real"
 SIM = "sim"
 BOTH = "both"
@@ -68,7 +73,10 @@ BOTH = "both"
 # ---------------------------------------------------------------------------
 # Every entry maps a firmware macro stem to the net it belongs to. `variants`
 # says which builds the connection exists in; a pin may appear twice ONLY if the
-# variants do not overlap, which is exactly the I2C/LCD case below.
+# variants do not overlap. No entry currently needs that - the simulation's 1602
+# was moved onto pins that are free in both builds precisely so it would not have
+# to claim the I2C lines - but the variant column still marks which nets are
+# simulation-only, which is what the pinout CSV reports.
 NET_TABLE = [
     # stem                net name          role                  variants
     ("STATUS_LED",        "LED_STATUS",     "Status LED (state blink)", BOTH),
@@ -125,8 +133,14 @@ RESERVED_PINS = [
 FIXED_PINS = [
     ("PA13", "SWDIO",     "Debug data - must stay free"),
     ("PA14", "SWCLK",     "Debug clock - must stay free"),
-    ("PA0",  "EXTI0",     "shared: limit open (PA0) / sensor out (PB0)"),
-    ("PA1",  "EXTI1",     "shared: limit close (PA1) / sensor in (PB1)"),
+    # These two lines carried BOTH a limit switch and a sensor until round 11.
+    # AFIO routes one port per line, so the sensor - initialised second - took
+    # both lines and the limit switches were left with no interrupt at all. The
+    # sensors moved to PB12/PB13 (lines 12/13). This table used to call the
+    # arrangement "shared", which was the wrong model: a line is not shareable,
+    # it is contended, and one side always loses.
+    ("PA0",  "EXTI0",     "limit open only - sensors are on EXTI12/13"),
+    ("PA1",  "EXTI1",     "limit close only - sensors are on EXTI12/13"),
     ("PD0",  "OSC_IN",    "8 MHz crystal"),
     ("PD1",  "OSC_OUT",   "8 MHz crystal"),
     ("NRST", "NRST",      "Reset, 10k pull-up + 100nF"),

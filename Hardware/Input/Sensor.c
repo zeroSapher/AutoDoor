@@ -28,8 +28,20 @@ void Sensor_Init(void)
     Debounce_Init(&s_outside, SENSOR_OUT_PORT, SENSOR_OUT_PIN, 0U, SENSOR_DEBOUNCE_MS);
     Debounce_Init(&s_inside,  SENSOR_IN_PORT,  SENSOR_IN_PIN,  0U, SENSOR_DEBOUNCE_MS);
 
-    /* Preemption priority 2: below the limits (0), above the keys (3). A person
-       arriving must be noticed promptly but must never delay a limit event. */
+    /*
+     * Preemption priority 2: below the limits (0), above the keys (3). A person
+     * arriving must be noticed promptly but must never delay a limit event.
+     *
+     * These are EXTI12/EXTI13, NOT EXTI0/EXTI1. They used to be PB0/PB1, which
+     * silently stole the limit switches' lines - see the pin-choice note in
+     * Core/main.h. Both sensors share the EXTI15_10 vector, which is why they use
+     * the same priority: a vector has one priority, and passing different values
+     * would just mean the last call wins.
+     *
+     * The return value is discarded deliberately: a bad pin mask or a line
+     * conflict is a static configuration error, and Exti_ConfigPin() counts
+     * conflicts for main() to report once the console exists.
+     */
     (void)Exti_ConfigPin(SENSOR_OUT_PORT, SENSOR_OUT_PIN, EXTI_Trigger_Falling, 2U, 0U);
     (void)Exti_ConfigPin(SENSOR_IN_PORT,  SENSOR_IN_PIN,  EXTI_Trigger_Falling, 2U, 0U);
 }

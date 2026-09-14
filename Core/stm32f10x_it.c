@@ -5,18 +5,23 @@
   *
   * EXTI SOURCE RESOLUTION
   * ----------------------
-  * On STM32F1 the EXTI lines are shared per pin NUMBER, so this project
-  * deliberately places one input per number and lets two different ports share a
-  * vector:
+  * On STM32F1 the EXTI lines are shared per pin NUMBER: PA0, PB0 and PC0 all map
+  * to EXTI0, and AFIO can route only ONE port to a line. The eight inputs are
+  * therefore placed on eight distinct numbers, and every handler below has a
+  * single possible source:
   *
-  *   EXTI0  ->  PA0 (open limit)        and  PB0 (outside sensor)
-  *   EXTI1  ->  PA1 (close limit)       and  PB1 (inside sensor)
+  *   EXTI0      ->  PA0        (open limit)
+  *   EXTI1      ->  PA1        (close limit)
+  *   EXTI5..8   ->  PB5..PB8   (keys, one shared vector)
+  *   EXTI12/13  ->  PB12/PB13  (sensors, one shared vector)
   *
-  * Both appear as the same vector, so the handler has to work out which one
-  * fired. Each input is debounced by re-reading its own pin after a settling
-  * window (see Debounce.c), which means a mis-attributed edge would be discarded
-  * on its own anyway - the extra `if` below is belt and braces, and it costs
-  * nothing because the pin read is what the debouncer does regardless.
+  * This block used to describe the opposite arrangement - "two different ports
+  * share a vector" - with the handlers working out the source by reading a pin.
+  * That could not work: the second initialiser takes the line away from the first,
+  * so the limit switches had no interrupt at all and their emergency-stop calls
+  * were unreachable code. Reading a pin to guess the source of an interrupt that
+  * cannot have come from there is not belt and braces; it is a wrong answer
+  * wearing a reassuring comment. See the EXTI note in Core/main.h.
   *
   * The handlers are intentionally minimal: flag an edge, and let the 1 ms tick
   * do everything else. Nothing time-consuming belongs in an ISR here, because
@@ -125,81 +130,93 @@ void SysTick_Handler(void)
 /*  Peripheral interrupts                                                    */
 /*===========================================================================*/
 
-/** USART1 - receive only; the buffering policy lives in UART.c. */
+/** USART1 - RX into the ring buffer, TX refilled from its own ring. */
 void USART1_IRQHandler(void)
 {
     if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)
     {
         UART_IrqHandler();
     }
+
+    if (USART_GetITStatus(USART1, USART_IT_TXE) != RESET)
+    {
+        UART_TxIrqHandler();
+    }
 }
 
 /**
-  * @brief  EXTI line 0 - open limit (PA0) or outside sensor (PB0).
+  * @brief  EXTI line 0 - the open limit switch (PA0), and nothing else.
+  * @note   This used to try to serve both PA0 and PB0, because the two shared
+  *         EXTI line 0. That could never have worked: AFIO routes exactly one
+  *         port to a line, so whichever module called Exti_ConfigPin() last took
+  *         the line - and since Sensor_Init() runs after Limit_Init(), it was
+  *         always the sensor. The limit switch had no interrupt at all, and every
+  *         Motor_EmergencyStop() below was unreachable by the limit. Reading the
+  *         pin to guess the source was therefore not "self-correcting", it was
+  *         guessing about an interrupt that could not have come from there.
+  *
+  *         The inputs now occupy distinct line numbers (see the EXTI rule in
+  *         Core/main.h), so this handler has exactly one possible source.
   */
 void EXTI0_IRQHandler(void)
 {
     if (EXTI_GetITStatus(EXTI_Line0) != RESET)
     {
-        /*
-         * Identify the source by reading the pin, and mind the polarity: both
-         * inputs are active LOW, so a LOW pin means the limit has tripped.
-         *
-         *   limit active  -> PA0 low
-         *   sensor active -> PB0 low
-         *
-         * If both were low at once the sensor branch wins, which simply means a
-         * missed edge event; the debouncer re-reads the pin either way, and the
-         * limit LEVEL is what actually stops the door (see Door_Update), so a
-         * wrong guess here is self-correcting rather than dangerous.
-         */
-        if (GPIO_ReadInputDataBit(LIMIT_OPEN_PORT, LIMIT_OPEN_PIN) == Bit_RESET)
-        {
-            Limit_IrqHandler(1U);
+        Limit_IrqHandler(1U);
 
-            /*
-             * Cut the motor HERE, not in the main loop.
-             *
-             * The state machine could be blocked when this fires - Motor_Stop()
-             * and Motor_Run() both ramp the duty down with Delay_ms(), and a log
-             * flush can spend milliseconds in the EEPROM. Waiting for the loop
-             * would mean the motor keeps driving into the end stop for the whole
-             * of that time. Motor_EmergencyStop() is two GPIO writes with no
-             * delay, so it is safe from interrupt context.
-             *
-             * The hardware NC contact already removes motor power as the outer
-             * layer; this is the fast electronic layer inside it.
-             */
-            Motor_EmergencyStop();
-        }
-        else
-        {
-            Sensor_IrqHandler(1U);
-        }
+        /*
+         * Cut the motor HERE, not in the main loop.
+         *
+         * The state machine can be blocked when this fires - Motor_Stop() ramps
+         * the duty down with Delay_ms(), the panel refresh spends ~140 ms on the
+         * I2C bus, and a log dump used to spend seconds there. Waiting for the
+         * loop would mean the motor keeps driving into the end stop for the whole
+         * of that time. Motor_EmergencyStop() is two GPIO writes with no delay,
+         * so it is safe from interrupt context.
+         *
+         * The hardware NC contact already removes motor power as the outer
+         * layer; this is the fast electronic layer inside it.
+         */
+        Motor_EmergencyStop();
 
         EXTI_ClearITPendingBit(EXTI_Line0);
     }
 }
 
 /**
-  * @brief  EXTI line 1 - close limit (PA1) or inside sensor (PB1).
+  * @brief  EXTI line 1 - the close limit switch (PA1), and nothing else.
+  * @note   See the note in EXTI0_IRQHandler for why this no longer tries to
+  *         serve the inside sensor as well.
   */
 void EXTI1_IRQHandler(void)
 {
     if (EXTI_GetITStatus(EXTI_Line1) != RESET)
     {
-        /* Active LOW, as on line 0 - see the note in EXTI0_IRQHandler. */
-        if (GPIO_ReadInputDataBit(LIMIT_CLOSE_PORT, LIMIT_CLOSE_PIN) == Bit_RESET)
-        {
-            Limit_IrqHandler(0U);
-            Motor_EmergencyStop();      /* see the note in EXTI0_IRQHandler */
-        }
-        else
-        {
-            Sensor_IrqHandler(0U);
-        }
+        Limit_IrqHandler(0U);
+        Motor_EmergencyStop();      /* see the note in EXTI0_IRQHandler */
 
         EXTI_ClearITPendingBit(EXTI_Line1);
+    }
+}
+
+/**
+  * @brief  EXTI lines 10-15 - the two presence sensors (PB12, PB13).
+  * @note   They are the only users of this vector, but the other lines in the
+  *         range are still tested so that a future input added here cannot be
+  *         silently swallowed by this handler.
+  */
+void EXTI15_10_IRQHandler(void)
+{
+    if (EXTI_GetITStatus(EXTI_Line12) != RESET)
+    {
+        Sensor_IrqHandler(1U);      /* outside sensor: someone entering */
+        EXTI_ClearITPendingBit(EXTI_Line12);
+    }
+
+    if (EXTI_GetITStatus(EXTI_Line13) != RESET)
+    {
+        Sensor_IrqHandler(0U);      /* inside sensor: someone leaving */
+        EXTI_ClearITPendingBit(EXTI_Line13);
     }
 }
 

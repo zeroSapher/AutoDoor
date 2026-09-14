@@ -27,9 +27,10 @@ void SysTick_Handler(void);
 void USART1_IRQHandler(void);           /* PC console                     */
 
 /* --- EXTI: one vector per line 0-4, then grouped --- */
-void EXTI0_IRQHandler(void);            /* PA0  open limit  / PB0 sensor-out */
-void EXTI1_IRQHandler(void);            /* PA1  close limit / PB1 sensor-in  */
-void EXTI9_5_IRQHandler(void);          /* PB5..PB8 keys                     */
+void EXTI0_IRQHandler(void);            /* PA0   open limit          */
+void EXTI1_IRQHandler(void);            /* PA1   close limit         */
+void EXTI9_5_IRQHandler(void);          /* PB5..PB8 keys             */
+void EXTI15_10_IRQHandler(void);        /* PB12/PB13 presence sensors */
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,4 @@
-﻿/**
+/**
   ******************************************************************************
   * @file    Log.h
   * @brief   Persistent event log: RAM queue backed by the AT24C32 EEPROM.

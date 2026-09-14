@@ -134,12 +134,98 @@ void Cmd_ReportStatus(void)
 /*  Command implementations                                                  */
 /*===========================================================================*/
 
+/**
+  * @brief  State of an in-progress log listing.
+  * @note   A listing is emitted a little at a time, from the main loop, instead of
+  *         inside the command handler.
+  *
+  *         WHY: a full ring is 252 records at ~92 characters each, which is
+  *         ~23 KB. The UART transmits that at 115200 baud, so the transfer takes
+  *         ~2 seconds - and it used to happen inside cmd_log(), i.e. inside the
+  *         main loop. For those two seconds Door_Update() never ran (no
+  *         level-triggered reversal safety net), poll_inputs() never ran (no
+  *         keypad emergency stop) and UART input was not parsed either, so a STOP
+  *         typed during a dump was ignored. Combined with the limit's EXTI having
+  *         been broken until this round, the only thing left that could stop the
+  *         motor during `LOG?ALL` was the hardware NC contact.
+  *
+  *         The UART link is the bottleneck and cannot be made faster, but the main
+  *         loop no longer waits for it: each iteration queues at most one record,
+  *         and only when the TX ring has room for it.
+  */
+static uint8_t  s_dumpActive = 0U;
+static uint16_t s_dumpNext   = 0U;   /* next index to emit      */
+static uint16_t s_dumpEnd    = 0U;   /* one past the last index */
+
+/* Room needed before one more record is queued. A record line is ~92 bytes worst
+   case; the slack leaves the ring usable for the spontaneous EVT and status lines
+   that share it. */
+#define LOG_DUMP_HEADROOM       128U
+
+static void print_record(uint16_t index, const LogEntry_t *e)
+{
+    UART_Printf("REC %u #%u [", (unsigned)index, (unsigned)e->seq);
+    print_timestamp(e->timestampMs);
+    UART_Printf("] boot#%u %-18s S=%-8s M=%s",
+                (unsigned)e->bootId,
+                Log_EventName(e->event),
+                Door_StateName((DoorState_t)e->doorState),
+                mode_name((DoorMode_t)e->mode));
+
+    if (e->durationMs != 0U)
+    {
+        UART_Printf(" DUR=%ums", (unsigned)e->durationMs);
+    }
+
+    UART_SendLine();
+}
+
+/**
+  * @brief  Emit the next slice of a pending log listing.
+  * @note   Call once per main-loop iteration. Emits NOTHING when the TX ring is
+  *         too full, which is what makes it non-blocking: the ring drains in the
+  *         interrupt while the loop goes on running the door.
+  */
+void Cmd_ProcessLogDump(void)
+{
+    LogEntry_t e;
+
+    if (s_dumpActive == 0U)
+    {
+        return;
+    }
+
+    if (s_dumpNext >= s_dumpEnd)
+    {
+        UART_SendString("OK LOG END\r\n");
+        s_dumpActive = 0U;
+        return;
+    }
+
+    if (UART_TxFree() < LOG_DUMP_HEADROOM)
+    {
+        return;         /* let the interrupt catch up; try again next iteration */
+    }
+
+    if (Log_Get(s_dumpNext, &e) != 0U)
+    {
+        UART_SendString("ERR LOG READ\r\n");
+        s_dumpActive = 0U;
+        return;
+    }
+
+    print_record(s_dumpNext, &e);
+    s_dumpNext++;
+}
+
+uint8_t Cmd_LogDumpActive(void)
+{
+    return s_dumpActive;
+}
+
 static void cmd_log(uint16_t want)
 {
     uint16_t count;
-    uint16_t i;
-    uint16_t start;
-    LogEntry_t e;
 
     /*
      * Persist before reporting. Without this the most recent events - up to
@@ -171,36 +257,16 @@ static void cmd_log(uint16_t want)
         want = count;
     }
 
-    /* Print the newest `want` records in chronological order. */
-    start = (uint16_t)(count - want);
-
+    /* Print the newest `want` records in chronological order, starting at the
+       oldest of those. */
     UART_Printf("OK LOG %u of %u\r\n", (unsigned)want, (unsigned)count);
 
-    for (i = 0U; i < want; i++)
-    {
-        if (Log_Get((uint16_t)(start + i), &e) != 0U)
-        {
-            UART_SendString("ERR LOG READ\r\n");
-            return;
-        }
+    s_dumpNext   = (uint16_t)(count - want);
+    s_dumpEnd    = count;
+    s_dumpActive = 1U;
 
-        UART_Printf("REC %u #%u [", (unsigned)(start + i), (unsigned)e.seq);
-        print_timestamp(e.timestampMs);
-        UART_Printf("] boot#%u %-18s S=%-8s M=%s",
-                    (unsigned)e.bootId,
-                    Log_EventName(e.event),
-                    Door_StateName((DoorState_t)e.doorState),
-                    mode_name((DoorMode_t)e.mode));
-
-        if (e.durationMs != 0U)
-        {
-            UART_Printf(" DUR=%ums", (unsigned)e.durationMs);
-        }
-
-        UART_SendLine();
-    }
-
-    UART_SendString("OK LOG END\r\n");
+    /* The records themselves are emitted by Cmd_ProcessLogDump() from the main
+       loop, one per iteration. */
 }
 
 /** Parse a decimal string strictly: only digits, no sign, no overflow. */

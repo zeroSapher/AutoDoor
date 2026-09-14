@@ -59,6 +59,17 @@ extern "C" {
  */
 #define UART_BAUDRATE           115200U
 #define UART_RX_BUFFER_SIZE     128U    /* must be a power of two */
+/*
+ * Transmit is buffered too, and this size is the headroom that keeps the door
+ * state machine responsive during a long output burst.
+ *
+ * UART_SendByte() used to busy-wait on TXE with no buffer at all, which is fine
+ * for a 60-byte status line and catastrophic for a log dump: 252 records is
+ * ~23 KB, i.e. ~2 s of blocked main loop, during which Door_Update() and
+ * poll_inputs() never run. With a TX ring plus the chunked dump in Cmd.c the
+ * producer normally never waits, and the 1 ms tick keeps running throughout.
+ */
+#define UART_TX_BUFFER_SIZE     256U    /* must be a power of two */
 
 /*
  * Naming: UART_RCC / UART_PORT, not UART_GPIO_*. Every other peripheral in this
@@ -105,30 +116,34 @@ extern "C" {
  * compile time and everything above it is unchanged, which is exactly what the
  * display abstraction in Display.h exists for.
  *
- * WIRING / PIN CONFLICT - READ THIS
- * ---------------------------------
- * A 4-bit HD44780 needs 6 pins, and this design has none free: every GPIO is
- * already committed to limits, sensors, keys, motor, console and the I2C bus.
- * The simulation build therefore CLAIMS PB10..PB15, which on the real board
- * carry the OLED/EEPROM I2C bus and the limit switches - three things the
- * simulation does not have:
+ * WIRING - THE SIMULATION MOVES, THE BOARD DOES NOT
+ * -------------------------------------------------
+ * A 4-bit HD44780 needs 6 pins, and the real board has none to spare. The 1602
+ * used to claim PB10..PB15, which forced two awkward declarations: an I2C/LCD
+ * overlap special case in tools/gen-hardware.py, and a note in the bring-up
+ * documentation about pins that meant different things per build.
  *
- *     PB10..PB13  ->  LCD D4..D7
- *     PB14        ->  LCD RS
- *     PB15        ->  LCD EN
+ * That was the wrong side of the trade. The 1602 exists only inside a Proteus
+ * simulation - it has no physical constraint at all - whereas PB12/PB13 are the
+ * only free EXTI lines suitable for the presence sensors. So the simulation's
+ * display is what moved, onto the six port A pins that are free in BOTH builds:
  *
- * Consequence: the simulation build cannot exercise the I2C bus or the
- * hardware limit inputs. Those are real-hardware-only features; see
- * docs/Proteus仿真方案.md for what the simulation can and cannot show.
+ *     PA2, PA3, PA6, PA7, PA8, PA15
+ *
+ * The overlap special case is gone with it, and PB10/PB11 (I2C) and PB12/PB13
+ * (sensors) now mean the same thing in both builds.
+ *
+ * Consequence: the simulation still cannot exercise the I2C bus or the EEPROM.
+ * Those are real-hardware-only features; see docs/Proteus仿真方案.md.
  */
-#define LCD1602_RCC             RCC_APB2Periph_GPIOB
-#define LCD1602_PORT            GPIOB
-#define LCD1602_RS_PIN          GPIO_Pin_14
-#define LCD1602_EN_PIN          GPIO_Pin_15
-#define LCD1602_D4_PIN          GPIO_Pin_10
-#define LCD1602_D5_PIN          GPIO_Pin_11
-#define LCD1602_D6_PIN          GPIO_Pin_12
-#define LCD1602_D7_PIN          GPIO_Pin_13
+#define LCD1602_RCC             RCC_APB2Periph_GPIOA
+#define LCD1602_PORT            GPIOA
+#define LCD1602_RS_PIN          GPIO_Pin_2
+#define LCD1602_EN_PIN          GPIO_Pin_3
+#define LCD1602_D4_PIN          GPIO_Pin_6
+#define LCD1602_D5_PIN          GPIO_Pin_7
+#define LCD1602_D6_PIN          GPIO_Pin_8
+#define LCD1602_D7_PIN          GPIO_Pin_15
 #define LCD1602_COLS            16U
 #define LCD1602_ROWS            2U
 
@@ -168,7 +183,7 @@ extern "C" {
 #define LIMIT_DEBOUNCE_MS       25U
 
 /*===========================================================================*/
-/*  Simulated presence sensors                                              */
+/*  Simulated presence sensors (buttons today, E18-D80NK later)              */
 /*===========================================================================*/
 /*
  * The parts list has no sensor that can detect a person (the TCRT5000 in it is
@@ -178,12 +193,35 @@ extern "C" {
  * This is a clean substitution rather than a throwaway hack: a button and a
  * real IR/optical sensor are both "active-low edge into an EXTI line plus
  * debounce", so swapping in an E18-D80NK later changes only these macros.
+ *
+ * PIN CHOICE - this is an EXTI decision, not a convenience one.
+ *
+ * These were PB0/PB1, which put them on EXTI0/EXTI1 - the same two lines the
+ * limit switches use, because on STM32F1 a line belongs to a pin NUMBER, not to
+ * a physical pin. AFIO can route only one port to a line, so the two modules
+ * fought over it and the one that initialised last won: Sensor_Init() runs after
+ * Limit_Init(), so the sensors took EXTI0/EXTI1 at priority 2 and the limit
+ * switches were left with NO interrupt at all - silently, since every caller
+ * discards Exti_ConfigPin()'s result.
+ *
+ * PB12/PB13 are on lines 12 and 13, which nothing else uses, so both limits and
+ * both sensors now have their own line. They share the EXTI15_10 vector, which
+ * is why both are configured with the same priority - one vector has one
+ * priority, and giving them different values would just mean the last call wins.
+ *
+ * Rejected alternatives, recorded so this is not re-litigated:
+ *   PA2/PA3  - lines 2/3 are free, but those pins are USART2, reserved for the
+ *              HC-05. Taking them would silently cost that option later.
+ *   PB2      - line 2 is free, but PB2 is BOOT1 and carries a board pull-down
+ *              that fights the internal pull-up.
+ *   PB9      - line 9 shares the EXTI9_5 vector with the four keys, which sit at
+ *              priority 3; one vector cannot hold both priorities.
  */
 #define SENSOR_RCC              RCC_APB2Periph_GPIOB
 #define SENSOR_OUT_PORT         GPIOB
-#define SENSOR_OUT_PIN          GPIO_Pin_0    /* EXTI0 - outside, someone entering */
+#define SENSOR_OUT_PIN          GPIO_Pin_12   /* EXTI12 - outside, someone entering */
 #define SENSOR_IN_PORT          GPIOB
-#define SENSOR_IN_PIN           GPIO_Pin_1    /* EXTI1 - inside, someone leaving   */
+#define SENSOR_IN_PIN           GPIO_Pin_13   /* EXTI13 - inside, someone leaving   */
 #define SENSOR_DEBOUNCE_MS      20U
 
 /*===========================================================================*/
@@ -202,6 +240,38 @@ extern "C" {
 
 /* A key must be held this long to count as a long press (emergency stop). */
 #define KEY_LONGPRESS_MS        1500U
+
+/*===========================================================================*/
+/*  EXTI LINE UNIQUENESS - checked, not merely documented                    */
+/*===========================================================================*/
+/*
+ * The rule at the top of this file ("those eight pins MUST sit on eight
+ * different numbers") was written down and then violated for several rounds:
+ * PA0/PB0 and PA1/PB1 both claimed lines 0 and 1, and because AFIO routes
+ * exactly one port per line, Sensor_Init() - running after Limit_Init() - took
+ * both lines away from the limit switches. The limit ISR became unreachable and
+ * nothing anywhere said so.
+ *
+ * A rule that only exists in a comment has already failed once. This is the
+ * check: the sum of the pins equals their bitwise OR if and only if no two of
+ * them share a bit position. A collision makes the typedef's array size
+ * negative, which is a compile error naming the problem.
+ *
+ * Every input that calls Exti_ConfigPin() must appear in both expressions below.
+ * Adding a ninth EXTI input without adding it here will not be caught - but a
+ * grep for "Exti_ConfigPin" finds every call site, and that is the audit.
+ */
+#define EXTI_PIN_SUM  ((uint32_t)LIMIT_OPEN_PIN  + (uint32_t)LIMIT_CLOSE_PIN + \
+                       (uint32_t)SENSOR_OUT_PIN  + (uint32_t)SENSOR_IN_PIN   + \
+                       (uint32_t)KEY1_PIN + (uint32_t)KEY2_PIN + \
+                       (uint32_t)KEY3_PIN + (uint32_t)KEY4_PIN)
+#define EXTI_PIN_OR   ((uint32_t)LIMIT_OPEN_PIN  | (uint32_t)LIMIT_CLOSE_PIN | \
+                       (uint32_t)SENSOR_OUT_PIN  | (uint32_t)SENSOR_IN_PIN   | \
+                       (uint32_t)KEY1_PIN | (uint32_t)KEY2_PIN | \
+                       (uint32_t)KEY3_PIN | (uint32_t)KEY4_PIN)
+
+typedef char exti_inputs_must_occupy_distinct_line_numbers[
+    (EXTI_PIN_SUM == EXTI_PIN_OR) ? 1 : -1];
 
 /*===========================================================================*/
 /*  Buzzer and status LED                                                    */

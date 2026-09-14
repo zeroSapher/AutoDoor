@@ -23,22 +23,22 @@ KEY4
     PB8    KEY4             Manual close / e-stop        [both]
 
 LCD_D4
-    PB10   LCD1602_D4       1602 data bit 4              [sim]
+    PA6    LCD1602_D4       1602 data bit 4              [sim]
 
 LCD_D5
-    PB11   LCD1602_D5       1602 data bit 5              [sim]
+    PA7    LCD1602_D5       1602 data bit 5              [sim]
 
 LCD_D6
-    PB12   LCD1602_D6       1602 data bit 6              [sim]
+    PA8    LCD1602_D6       1602 data bit 6              [sim]
 
 LCD_D7
-    PB13   LCD1602_D7       1602 data bit 7              [sim]
+    PA15   LCD1602_D7       1602 data bit 7              [sim]
 
 LCD_EN
-    PB15   LCD1602_EN       1602 enable                  [sim]
+    PA3    LCD1602_EN       1602 enable                  [sim]
 
 LCD_RS
-    PB14   LCD1602_RS       1602 register select         [sim]
+    PA2    LCD1602_RS       1602 register select         [sim]
 
 LED_STATUS
     PB4    STATUS_LED       Status LED (state blink)     [both]
@@ -56,10 +56,10 @@ MOTOR_IB
     PA5    MOTOR_IB         L9110S IB                    [both]
 
 SENSOR_IN
-    PB1    SENSOR_IN        Inside presence              [both]
+    PB13   SENSOR_IN        Inside presence              [both]
 
 SENSOR_OUT
-    PB0    SENSOR_OUT       Outside presence             [both]
+    PB12   SENSOR_OUT       Outside presence             [both]
 
 USART1_RX
     PA10   UART_RX          Console RX                   [both]

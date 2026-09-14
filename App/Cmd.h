@@ -47,6 +47,26 @@ void Cmd_Init(void);
   */
 void Cmd_Process(void);
 
+/**
+  * @brief  Emit the next slice of a log listing, if one is in progress.
+  * @note   Call once per main-loop iteration, right after Cmd_Process(). A full
+  *         ring is ~23 KB of output, i.e. ~2 s at 115200 baud; emitting that from
+  *         inside the command handler stopped Door_Update() and poll_inputs() for
+  *         the whole transfer. This queues at most one record per call and emits
+  *         nothing at all when the TX ring is too full to take it, so the door
+  *         keeps running at full rate throughout.
+  */
+void Cmd_ProcessLogDump(void);
+
+/**
+  * @brief  Non-zero while a log listing is still being emitted.
+  * @note   The main loop suppresses the EEPROM log flush while this is set: the
+  *         listing walks Log_Get() by relative index, and flushing a record
+  *         advances wrIndex, which would shift every index underneath it and make
+  *         the listing skip or repeat entries.
+  */
+uint8_t Cmd_LogDumpActive(void);
+
 /*===========================================================================*/
 /*  Reporting hooks - called from the application's Door callbacks            */
 /*===========================================================================*/

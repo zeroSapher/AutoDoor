@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    UART.c
-  * @brief   USART1 serial driver: interrupt-driven RX ring buffer, blocking TX.
+  * @brief   USART1 serial driver: interrupt-driven RX and TX ring buffers.
   ******************************************************************************
   */
 
@@ -29,6 +29,31 @@ static volatile uint16_t s_rxHead = 0U;     /* ISR write index   */
 static volatile uint16_t s_rxTail = 0U;     /* consumer read idx */
 
 /*===========================================================================*/
+/*  TX ring buffer                                                           */
+/*===========================================================================*/
+
+/*
+ * Same pattern with the roles swapped: head is written only by the main loop
+ * (the producer) and tail only by the USART1 interrupt (the consumer). No
+ * critical section is needed for the same reason as RX.
+ *
+ * The purpose is not throughput - the link is the bottleneck either way - but
+ * LATENCY. A blocking TX makes every UART_SendByte() call part of the caller's
+ * execution time, so whoever prints a long listing stops the door state machine
+ * for the whole transmission. Buffering moves that time into the interrupt,
+ * where it costs nothing that matters.
+ *
+ * When the ring is full the producer waits. That is deliberate: dropping console
+ * output silently is worse than briefly stalling, and UART_TxFree() lets the one
+ * caller that emits a lot (the log dump) avoid the wait entirely.
+ */
+#define UART_TX_MASK            (UART_TX_BUFFER_SIZE - 1U)
+
+static volatile uint8_t  s_txBuffer[UART_TX_BUFFER_SIZE];
+static volatile uint16_t s_txHead = 0U;     /* producer write idx */
+static volatile uint16_t s_txTail = 0U;     /* ISR read index    */
+
+/*===========================================================================*/
 /*  Initialisation                                                           */
 /*===========================================================================*/
 
@@ -41,6 +66,9 @@ void UART_Init(void)
     /* Guard against a configuration mistake that would break the mask maths. */
 #if (UART_RX_BUFFER_SIZE & UART_RX_MASK) != 0
 #error "UART_RX_BUFFER_SIZE must be a power of two"
+#endif
+#if (UART_TX_BUFFER_SIZE & UART_TX_MASK) != 0
+#error "UART_TX_BUFFER_SIZE must be a power of two"
 #endif
 
     RCC_APB2PeriphClockCmd(UART_RCC | RCC_APB2Periph_USART1, ENABLE);
@@ -64,7 +92,11 @@ void UART_Init(void)
     USART_InitStructure.USART_Mode                = USART_Mode_Rx | USART_Mode_Tx;
     USART_Init(USART1, &USART_InitStructure);
 
-    /* Receive-not-empty interrupt: fires once per received byte. */
+    /* Receive-not-empty interrupt: fires once per received byte.
+       TXE (transmit-register-empty) is deliberately left DISABLED here and is
+       enabled by UART_SendByte() only while there is something to send, so the
+       handler is never entered with an empty ring. An always-enabled TXE
+       interrupt would fire continuously and eat the CPU. */
     USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
 
     NVIC_InitStructure.NVIC_IRQChannel                   = USART1_IRQn;
@@ -103,17 +135,62 @@ void UART_IrqHandler(void)
     }
 }
 
+/**
+  * @brief  Feed the transmit register from the ring - call on TXE.
+  * @note   Drains as much as the hardware allows in one visit, then disables the
+  *         TXE interrupt when the ring runs dry. Disabling it only after
+  *         re-reading the indices is what makes the producer's
+  *         "push then enable" sequence safe: the producer is the main loop and
+  *         cannot run while this is executing, so a byte pushed before this
+  *         point is seen here, and one pushed after it will enable the interrupt
+  *         again (TXE is still set, so it fires immediately rather than being
+  *         lost).
+  */
+void UART_TxIrqHandler(void)
+{
+    while ((s_txTail != s_txHead) &&
+           (USART_GetFlagStatus(USART1, USART_FLAG_TXE) != RESET))
+    {
+        USART_SendData(USART1, s_txBuffer[s_txTail]);
+        s_txTail = (uint16_t)((s_txTail + 1U) & UART_TX_MASK);
+    }
+
+    if (s_txTail == s_txHead)
+    {
+        USART_ITConfig(USART1, USART_IT_TXE, DISABLE);
+    }
+}
+
 /*===========================================================================*/
 /*  Transmit                                                                 */
 /*===========================================================================*/
 
 void UART_SendByte(uint8_t byte)
 {
-    while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET)
+    uint16_t next = (uint16_t)((s_txHead + 1U) & UART_TX_MASK);
+
+    /* Wait only when the ring is full; the interrupt is draining it. The wait
+       is bounded by the ring size, not by the length of the output. */
+    while (next == (s_txTail & UART_TX_MASK))
     {
-        /* wait for the transmit register to drain */
     }
-    USART_SendData(USART1, byte);
+
+    s_txBuffer[s_txHead] = byte;
+    s_txHead = next;
+
+    USART_ITConfig(USART1, USART_IT_TXE, ENABLE);
+}
+
+uint16_t UART_TxFree(void)
+{
+    /* One slot is always left empty, which is what makes head == tail
+       unambiguous. */
+    return (uint16_t)(UART_TX_MASK - ((s_txHead - s_txTail) & UART_TX_MASK));
+}
+
+uint16_t UART_TxPending(void)
+{
+    return (uint16_t)((s_txHead - s_txTail) & UART_TX_MASK);
 }
 
 void UART_SendBytes(const uint8_t *data, uint16_t len)
