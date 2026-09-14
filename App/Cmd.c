@@ -268,9 +268,20 @@ void Cmd_Process(void)
     }
     if (strcmp(line, "LOG?CLEAR") == 0)
     {
-        if (Log_Clear() == 0U)
+        uint8_t rc = Log_Clear();
+
+        if (rc == 0U)
         {
             UART_SendString("OK LOG CLEARED\r\n");
+        }
+        else if (rc == 2U)
+        {
+            /* The rare generation-wrap erase failed part way. The log has been
+               reloaded from what physically survives, so it is usable but NOT
+               empty - saying "ERR EEPROM" alone would leave the caller guessing
+               whether anything was deleted. */
+            UART_Printf("ERR EEPROM (clear incomplete, %u records remain)\r\n",
+                        (unsigned)Log_Count());
         }
         else
         {

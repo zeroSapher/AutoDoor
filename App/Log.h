@@ -54,8 +54,22 @@ typedef enum
 } LogEvent_t;
 
 /*===========================================================================*/
-/*  Record layout - 16 bytes, little endian                                  */
+/*  Record layout - the on-EEPROM record is 16 bytes, little endian          */
 /*===========================================================================*/
+
+/*
+ * THIS STRUCT IS NOT THE WIRE FORMAT.
+ *
+ * Log.c packs and unpacks the record field by field at explicit byte offsets,
+ * so the stored record is 16 bytes while sizeof(LogEntry_t) is 20: the compiler
+ * 4-byte-aligns timestampMs (2 bytes of padding after `seq`) and 2-byte-aligns
+ * durationMs (1 byte after `mode`). A compile-time assertion in Log.c pins both
+ * facts.
+ *
+ * Never use sizeof(LogEntry_t) as the record stride, as an EEPROM read/write
+ * length, or as a memcpy size - that would write 20-byte records over 16-byte
+ * slots. LOG_ENTRY_SIZE is the stride.
+ */
 typedef struct
 {
     uint16_t seq;           /* monotonic record number, for ordering         */
@@ -66,7 +80,7 @@ typedef struct
     uint8_t  mode;          /* 0 = AUTO, 1 = MANUAL                          */
     uint16_t durationMs;    /* travel time for OPEN_DONE / CLOSE_DONE        */
     uint8_t  reserved[3];   /* [0..1] = erase generation, [2] unused        */
-} LogEntry_t;
+} LogEntry_t;               /* sizeof == 20, NOT the 16-byte stored record  */
 
 /*===========================================================================*/
 /*  Lifecycle                                                                */

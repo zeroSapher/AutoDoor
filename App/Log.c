@@ -97,6 +97,28 @@
    left over from a version-1 layout (generation 0) are never accepted. */
 #define LOG_GENERATION_INIT 1U
 
+/*
+ * The struct and the wire format are NOT the same thing.
+ *
+ * LogEntry_t is padded to 20 bytes by the compiler: 4-byte alignment of
+ * timestampMs leaves 2 bytes after `seq`, and 2-byte alignment of durationMs
+ * leaves 1 byte after `mode`. The EEPROM record is 16 bytes of explicitly packed
+ * fields (see the offsets in record_write/record_read). sizeof(LogEntry_t) must
+ * therefore never be used as the record stride, as an EEPROM_Write length, or as
+ * a memcpy size - doing so would write 20-byte records over 16-byte slots.
+ *
+ * That confusion is exactly what an earlier comment in Log.h invited by calling
+ * the struct "16 bytes". These asserts pin the wire layout instead of the
+ * struct: they fail the build if a field width changes without the offsets in
+ * record_write()/record_read() being re-derived. tools/check-log-layout.py
+ * verifies the same thing more thoroughly from the outside.
+ */
+_Static_assert((2U + 4U + 2U + 1U + 1U + 1U + 2U + 2U + 1U) == LOG_ENTRY_SIZE,
+               "the packed record fields no longer fill LOG_ENTRY_SIZE");
+_Static_assert(sizeof(LogEntry_t) != LOG_ENTRY_SIZE,
+               "LogEntry_t unexpectedly matches the wire size - recheck the "
+               "byte-packing comments, which assume the two differ");
+
 /*===========================================================================*/
 /*  Internal state                                                           */
 /*===========================================================================*/
@@ -142,6 +164,20 @@ static uint8_t          s_flushing = 0U;
    each failed attempt costs a full EEPROM_WRITE_TIMEOUT_MS of busy polling -
    the door state machine would be starved by a bus that is not answering. */
 static uint8_t          s_flushFailed = 0U;
+
+/* The records are in the EEPROM but the header describing them is not. The ring
+   state in RAM (count, wrIndex, totalEvents) is ahead of what is stored, so the
+   header has to be written again before the next boot can see it. Set whenever a
+   header write fails - during a flush, or at the end of Log_Init - and cleared
+   by the first success.
+   
+   This exists because dropping the batch on a header failure (which is correct:
+   the records must not be rewritten) would otherwise leave the header stale
+   until some LATER batch happened to flush successfully. Until then a power cut
+   costs the lifetime counter everything in that window, even though every record
+   survived - the header page is the most-written page in the device, one write
+   per batch, so it is also the most likely one to fail. */
+static uint8_t          s_headerDirty = 0U;
 
 static uint16_t    s_seqCounter   = 0U;
 /*===========================================================================*/
@@ -235,9 +271,28 @@ static uint8_t record_write(uint16_t slot, const LogEntry_t *e)
 static uint8_t record_read(uint16_t slot, LogEntry_t *e)
 {
     uint8_t buf[LOG_ENTRY_SIZE];
-    uint8_t rc;
+    uint8_t rc = MYI2C_ERR_NACK;
+    uint8_t attempt;
 
-    rc = EEPROM_Read(slot_address(slot), buf, LOG_ENTRY_SIZE);
+    /*
+     * A failed read used to be treated as "empty slot" by every caller, which
+     * silently shortened the recovered record count and could point wrIndex back
+     * into the middle of the ring. An AT24C32 read failing is overwhelmingly
+     * transient - a glitch on the bus, or the tail of a write cycle - so retry
+     * before drawing any conclusion. A slot that still will not read after the
+     * retries is skipped by the caller, which is the least-wrong option
+     * available: the data is genuinely not readable.
+     */
+    for (attempt = 0U; attempt < 3U; attempt++)
+    {
+        rc = EEPROM_Read(slot_address(slot), buf, LOG_ENTRY_SIZE);
+        if (rc == MYI2C_OK)
+        {
+            break;
+        }
+        Delay_ms(1U);
+    }
+
     if (rc != MYI2C_OK)
     {
         return rc;
@@ -369,15 +424,97 @@ static uint8_t rebuild_from_records(uint16_t *newestSeqOut)
 }
 
 /**
-  * @brief  Write a brand-new header: empty ring, defaults, given generation.
-  * @param  generation  Erase generation to start from. Must never be one that
-  *                     could already be stamped on records still in the ring -
-  *                     that is why the caller passes a monotonically increasing
-  *                     value rather than always 1.
+  * @brief  Highest generation stamp present anywhere in the record area.
+  * @return The maximum stamp over all non-blank records, or 0 when there are
+  *         none.
+  * @note   Used to pick the generation for a fresh header, and it is read from
+  *         the ring rather than derived from the header on purpose: the header
+  *         can LAG the stamps. A clear whose header write fails leaves the
+  *         persisted generation behind while subsequent record writes - which
+  *         target different pages and may well succeed - stamp records with the
+  *         already-incremented value. Choosing headerGeneration + 1 would then
+  *         land exactly on the stamp those records carry, and the next boot's
+  *         scan would count them: the resurrection bug the generation field
+  *         exists to prevent, reached by a different route.
+  * @note   The comparison is a plain numeric maximum, not the wrap-safe signed
+  *         one used for sequence numbers. That is deliberate: generation is a
+  *         monotonic counter, and if it has wrapped the caller's next step is a
+  *         full erase anyway.
+  */
+static uint16_t scan_max_stamp(void)
+{
+    LogEntry_t e;
+    uint16_t   i;
+    uint16_t   maxStamp = 0U;
+
+    for (i = 0U; i < LOG_SLOT_COUNT; i++)
+    {
+        uint16_t stamp;
+
+        if (record_read(i, &e) != MYI2C_OK)
+        {
+            continue;
+        }
+
+        /* Blank slots read back as 0xFF, so their stamp bytes are 0xFFFF and
+           mean nothing. Filter them on the event byte first. */
+        if ((e.event == 0xFFU) || (e.event == LOG_EVT_NONE))
+        {
+            continue;
+        }
+
+        stamp = (uint16_t)((uint16_t)e.reserved[0] | ((uint16_t)e.reserved[1] << 8));
+        if (stamp > maxStamp)
+        {
+            maxStamp = stamp;
+        }
+    }
+
+    return maxStamp;
+}
+
+/**
+  * @brief  Write a brand-new header: empty ring, given generation.
+  * @param  generation  Erase generation to start from. Must not be one that is
+  *                     already stamped on any record still in the ring - the
+  *                     caller derives it from scan_max_stamp().
+  * @param  oldHdr      A readable header from an older record layout, or 0 for a
+  *                     blank/foreign device. When non-0 the configuration and the
+  *                     lifetime counters are carried over: only the record layout
+  *                     is version-specific, so a firmware upgrade should reset
+  *                     the log and nothing else.
   * @return 0 on success, non-zero if the header page could not be written.
   */
-static uint8_t initialise_fresh(uint16_t generation)
+static uint8_t initialise_fresh(uint16_t generation, const uint8_t *oldHdr)
 {
+    uint16_t preservedDelay = DOOR_AUTO_CLOSE_MS;
+    uint8_t  preservedMode  = 0U;
+    uint16_t preservedSeq   = 0U;
+    uint64_t preservedTotal = 0ULL;
+    uint16_t firstBootId    = 1U;
+
+    if (oldHdr != 0)
+    {
+        preservedDelay = get16(&oldHdr[HDR_OFF_DELAY]);
+        preservedMode  = oldHdr[HDR_OFF_MODE];
+        preservedSeq   = get16(&oldHdr[HDR_OFF_SEQ_NEXT]);
+        preservedTotal = (((uint64_t)get32(&oldHdr[HDR_OFF_TOTAL_HI])) << 32) |
+                         (uint64_t)get32(&oldHdr[HDR_OFF_TOTAL_LO]);
+        firstBootId    = (uint16_t)(get16(&oldHdr[HDR_OFF_BOOT_ID]) + 1U);
+
+        /* Clamp exactly as the normal load path does - an old header deserves
+           no more trust than a current one. */
+        if ((preservedDelay < DOOR_AUTO_CLOSE_MIN_MS) ||
+            (preservedDelay > DOOR_AUTO_CLOSE_MAX_MS))
+        {
+            preservedDelay = DOOR_AUTO_CLOSE_MS;
+        }
+        if (preservedMode > 1U)
+        {
+            preservedMode = 0U;
+        }
+    }
+
     if (generation == 0U)
     {
         /*
@@ -395,14 +532,14 @@ static uint8_t initialise_fresh(uint16_t generation)
 
     s_hdr.count       = 0U;
     s_hdr.wrIndex     = 0U;
-    s_hdr.delayMs     = DOOR_AUTO_CLOSE_MS;
-    s_hdr.mode        = 0U;
-    s_hdr.seqNext     = 0U;
-    s_hdr.bootId      = 1U;
+    s_hdr.delayMs     = preservedDelay;
+    s_hdr.mode        = preservedMode;
+    s_hdr.seqNext     = preservedSeq;
+    s_hdr.bootId      = firstBootId;
     s_hdr.generation  = generation;
-    s_hdr.totalEvents = 0U;
+    s_hdr.totalEvents = preservedTotal;
 
-    s_seqCounter = 0U;
+    s_seqCounter = s_hdr.seqNext;
 
     if (header_write() != MYI2C_OK)
     {
@@ -426,6 +563,7 @@ uint8_t Log_Init(void)
     s_flushRequest = 0U;
     s_flushing     = 0U;
     s_flushFailed  = 0U;
+    s_headerDirty  = 0U;
     s_flushTimerMs = 0U;
 
     if (EEPROM_IsPresent() == 0U)
@@ -458,26 +596,34 @@ uint8_t Log_Init(void)
      * A blank or foreign device, or one written by an older record layout, gets
      * a fresh ring.
      *
-     * The generation is chosen so that records already in the ring can never be
-     * mistaken for new ones:
+     * The generation must not already be stamped on anything still in the ring,
+     * so it is derived from the ring itself (scan_max_stamp) rather than from the
+     * header. The header can lag the stamps, and headerGeneration + 1 would then
+     * collide exactly - see the note on scan_max_stamp() for the sequence that
+     * produces that. This is why the earlier "old generation + 1" version of this
+     * code was still wrong: it trusted a field the code itself can leave stale.
      *
-     *   - blank device    -> generation 1. There is nothing in the ring, and a
-     *                        version-1 record carries generation 0, so it cannot
-     *                        collide either.
-     *   - version bump    -> the old generation + 1, NOT 1. Resetting to 1 would
-     *                        make records stamped with generation 1 by an earlier
-     *                        firmware visible again the moment a future version
-     *                        is flashed, which is exactly the resurrection bug
-     *                        Log_Clear() was fixed to avoid - just triggered by
-     *                        an upgrade instead of a command.
+     * A blank/foreign device has no trustworthy header at all, so only the ring
+     * is consulted; a readable-but-old header also contributes its generation,
+     * since it may be ahead of anything currently stored.
      */
     if ((magicOk == 0U) || (get16(&hdr[HDR_OFF_VERSION]) != LOG_VERSION))
     {
-        uint16_t startGen = (magicOk != 0U)
-                          ? (uint16_t)(get16(&hdr[HDR_OFF_GENERATION]) + 1U)
-                          : LOG_GENERATION_INIT;
+        uint16_t maxStamp = scan_max_stamp();
+        uint16_t startGen;
 
-        if (initialise_fresh(startGen) != 0U)
+        if (magicOk == 0U)
+        {
+            startGen = (uint16_t)(maxStamp + 1U);
+        }
+        else
+        {
+            uint16_t hdrGen = get16(&hdr[HDR_OFF_GENERATION]);
+
+            startGen = (uint16_t)(((hdrGen > maxStamp) ? hdrGen : maxStamp) + 1U);
+        }
+
+        if (initialise_fresh(startGen, (magicOk != 0U) ? hdr : 0) != 0U)
         {
             return 3U;
         }
@@ -530,10 +676,20 @@ uint8_t Log_Init(void)
     s_hdr.bootId++;
     s_seqCounter = s_hdr.seqNext;
 
-    /* Persist the incremented boot counter, the recovered ring position, the
-       loaded lifetime counter (which rebuild_from_records() leaves alone) and
-       the corrected sequence number. */
-    (void)header_write();
+    /*
+     * Persist the incremented boot counter, the recovered ring position, the
+     * loaded lifetime counter (which rebuild_from_records() leaves alone) and the
+     * corrected sequence number.
+     *
+     * A failure here is not fatal - the RAM state is already correct and the door
+     * runs - but it must not be forgotten either. s_headerDirty makes Log_Flush()
+     * write the header again even when nothing is queued, so the EEPROM stops
+     * describing the previous boot as soon as the bus recovers.
+     */
+    if (header_write() != MYI2C_OK)
+    {
+        s_headerDirty = 1U;
+    }
 
     s_ready = 1U;
     return 0U;
@@ -567,13 +723,22 @@ uint8_t Log_Flush(void)
         s_flushFailed = 1U;
         return 1U;
     }
-    if (s_pendingCount == 0U)
+
+    /*
+     * Nothing queued is NOT the same as nothing to do: the records may all be
+     * stored already with only their header outstanding (s_headerDirty). That
+     * case falls through to the header write below with an empty loop, which is
+     * exactly the retry needed. Returning early here - as this function used to -
+     * left the header stale until some later batch happened to flush.
+     */
+    if ((s_pendingCount == 0U) && (s_headerDirty == 0U))
     {
         s_flushProgress = 0U;
         s_flushTimerMs  = 0U;
         s_flushFailed   = 0U;
         return 0U;
     }
+
     if (s_flushing != 0U)
     {
         return 1U;      /* already inside a flush; see the note above */
@@ -589,7 +754,9 @@ uint8_t Log_Flush(void)
         if (record_write(s_hdr.wrIndex, &s_pending[i]) != MYI2C_OK)
         {
             /* EEPROM unreachable: keep the entries queued rather than losing
-               them silently, and let the next flush resume from here. */
+               them silently, and let the next flush resume from here. Anything
+               already written stays written, and the header is not touched -
+               the next boot's scan recovers those records on its own. */
             s_flushing    = 0U;
             s_flushFailed = 1U;
             return 1U;
@@ -610,43 +777,32 @@ uint8_t Log_Flush(void)
         s_hdr.totalEvents++;
     }
 
+    /*
+     * Reaching here means either there was something to write (and it is now
+     * stored) or there was a stale header to retry. Either way the queue has been
+     * dealt with, so it is emptied BEFORE the header write: if the header write
+     * fails, those records must not be written a second time, and leaving them
+     * queued would also pin a full queue forever and make Log_Add() drop every
+     * new event. s_headerDirty is what remembers that the header still owes them.
+     */
+    s_pendingCount  = 0U;
+    s_flushProgress = 0U;
+
     rc = header_write();
 
     if (rc == MYI2C_OK)
     {
-        s_pendingCount  = 0U;
-        s_flushProgress = 0U;
-        s_flushTimerMs  = 0U;
-    }
-    else if (s_flushProgress != 0U)
-    {
-        /*
-         * The records themselves are stored; only the header write failed. They
-         * must not be re-written (that would duplicate records to fix a header
-         * that the next boot's scan does not need), so the committed prefix is
-         * dropped from the queue instead - the RAM ring state already includes it
-         * and the next successful header write publishes that.
-         *
-         * Dropping it is not just an optimisation: leaving it would pin a full
-         * queue forever if the header page kept failing, and Log_Add() would then
-         * drop every new event. A single un-writable page must not be able to
-         * switch event collection off.
-         */
-        uint8_t remaining = (uint8_t)(s_pendingCount - s_flushProgress);
-
-        memmove(&s_pending[0], &s_pending[s_flushProgress],
-                (size_t)remaining * sizeof(LogEntry_t));
-
-        s_pendingCount  = remaining;
-        s_flushProgress = 0U;
+        s_headerDirty = 0U;
+        s_flushFailed = 0U;
+        s_flushTimerMs = 0U;
     }
     else
     {
-        /* Nothing reached the EEPROM at all; the whole batch stays queued. */
+        s_headerDirty = 1U;
+        s_flushFailed = 1U;
     }
 
-    s_flushing    = 0U;
-    s_flushFailed = (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
+    s_flushing = 0U;
     return (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
 }
 
@@ -686,7 +842,7 @@ void Log_Tick1ms(void)
         return;
     }
 
-    if (s_pendingCount == 0U)
+    if ((s_pendingCount == 0U) && (s_headerDirty == 0U))
     {
         s_flushTimerMs = 0U;
         return;
@@ -898,19 +1054,41 @@ uint8_t Log_Clear(void)
          * because there is no way to invalidate 252 records that already carry
          * the generation we are about to reuse.
          */
+        uint16_t newestSeq = 0U;
+
         if (erase_all_slots() != 0U)
         {
-            /* The generation has NOT been written yet, so the header still
-               describes the old, intact ring. Leave it alone and report the
-               failure: nothing has changed. */
+            /*
+             * The erase stopped part way through, which is the one place in this
+             * function where the ring is left inconsistent: some slots are now
+             * blank while s_hdr.count and s_hdr.wrIndex still describe the old,
+             * full ring. Log_Get() walks `count` slots back from wrIndex, so with
+             * a full ring every index would land on an erased slot and be printed
+             * as a record with event 0xFF ("UNKNOWN") and sequence 0xFFFF.
+             *
+             * So rescan and let the EEPROM say what actually survives. The
+             * generation is put back BEFORE the scan so the surviving records -
+             * which still carry it - are the ones counted.
+             */
             s_hdr.generation = 0xFFFFU;
+            (void)rebuild_from_records(&newestSeq);
+            s_headerDirty = 1U;
+
             return 2U;
         }
 
         s_hdr.generation = LOG_GENERATION_INIT;
     }
 
-    /* Anything still queued belongs to the log being erased. */
+    /*
+     * Anything still queued belongs to the log being erased, but it has already
+     * been counted by Log_TotalEvents(): dropping the queue without folding it in
+     * first would make TOTAL go BACKWARDS, which contradicts it being a lifetime
+     * counter. The events are lost (that is what clearing means) - the count of
+     * how many this unit has ever seen is not.
+     */
+    s_hdr.totalEvents += (uint64_t)(s_pendingCount - s_flushProgress);
+
     s_pendingCount  = 0U;
     s_flushProgress = 0U;
     s_flushRequest  = 0U;
@@ -922,8 +1100,13 @@ uint8_t Log_Clear(void)
         uint8_t rc = header_write();
 
         /* Keep the retry-pacing flag honest: a successful clear proves the bus
-           works, a failed one is exactly the condition the backoff exists for. */
+           works, a failed one is exactly the condition the backoff exists for.
+           A failed clear also leaves the EEPROM header describing the previous
+           generation while RAM has moved on, so the header is marked dirty and
+           Log_Flush() will publish the new generation - and, with it, make the
+           clear actually take effect - as soon as the bus recovers. */
         s_flushFailed = (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
+        s_headerDirty = (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
 
         return rc;
     }
