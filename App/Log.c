@@ -511,11 +511,82 @@ uint8_t Log_Get(uint16_t index, LogEntry_t *out)
     return record_read(slot, out);
 }
 
+/**
+  * @brief  Invalidate one record slot so the recovery scan will ignore it.
+  * @note   The whole slot is filled with 0xFF, which is exactly what erased
+  *         EEPROM reads back as and what rebuild_from_records() skips. Every
+  *         byte is set explicitly: a partial initialiser such as
+  *         `= { 0xFFU }` would zero the remaining bytes, and a record whose
+  *         event byte happens to land on 0xFF but whose other bytes are zero
+  *         would still be skipped - but the intent would be unclear and any
+  *         change to the empty test would silently break it.
+  */
+static uint8_t slot_erase(uint16_t slot, uint8_t eepromPresent, uint16_t *erased)
+{
+    uint8_t blank[LOG_ENTRY_SIZE];
+    uint8_t k;
+
+    if (eepromPresent == 0U)
+    {
+        /* No memory to clear; count the slot as handled so the caller does not
+           treat this as a failure. */
+        (*erased)++;
+        return MYI2C_OK;
+    }
+
+    for (k = 0U; k < LOG_ENTRY_SIZE; k++)
+    {
+        blank[k] = 0xFFU;
+    }
+
+    if (EEPROM_Write(slot_address(slot), blank, LOG_ENTRY_SIZE) != MYI2C_OK)
+    {
+        return MYI2C_ERR_TIMEOUT;
+    }
+
+    (*erased)++;
+    return MYI2C_OK;
+}
+
 uint8_t Log_Clear(void)
 {
+    uint16_t i;
+    uint16_t erased = 0U;
+    uint8_t  eepromPresent;
+
     if (s_ready == 0U)
     {
         return 1U;
+    }
+
+    eepromPresent = EEPROM_IsPresent();
+
+    /*
+     * Clearing the header alone is NOT enough, and that was a real bug: the
+     * record area still holds valid-looking entries, and Log_Init() rebuilds the
+     * ring by scanning all LOG_SLOT_COUNT slots on every boot. So a cleared log
+     * would come back after the next power cycle.
+     *
+     * The records are therefore invalidated by writing them blank (0xFF, which
+     * rebuild_from_records() skips). That is up to 252 page-writes - slow, but
+     * this is a user-initiated command and it runs in the main loop, never on the
+     * limit-switch path, so blocking here cannot delay a safety response.
+     *
+     * It is also the only approach that survives leaving no residue: no validity
+     * marker is needed in the header, so an interrupted clear cannot leave a
+     * record that the scan would still accept.
+     */
+    if (eepromPresent != 0U)
+    {
+        for (i = 0U; i < LOG_SLOT_COUNT; i++)
+        {
+            if (slot_erase(i, eepromPresent, &erased) != MYI2C_OK)
+            {
+                /* Stop at the first failure and leave the header untouched, so
+                   the ring description still matches what is actually stored. */
+                return 2U;
+            }
+        }
     }
 
     s_pendingCount = 0U;

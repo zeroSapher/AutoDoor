@@ -273,9 +273,26 @@ void Cmd_Process(void)
     /* ---- DELAY=<ms> ----------------------------------------------------- */
     if (strncmp(line, "DELAY=", 6) == 0)
     {
+        uint8_t persistOk;
+
         if (parse_u32(&line[6], &value) != 0U)
         {
             UART_SendString("ERR BAD_ARG\r\n");
+            return;
+        }
+
+        /*
+         * Validate BEFORE narrowing to uint16_t. Passing (uint16_t)value into the
+         * range check truncated the argument first, so DELAY=70000 became 4464,
+         * passed the range test, and was accepted - the caller asked for 70 s and
+         * silently got 4.4 s. Anything above the uint16 range is out of range by
+         * definition, so it is rejected here rather than wrapped.
+         */
+        if (value > 0xFFFFUL)
+        {
+            UART_Printf("ERR RANGE %u..%u\r\n",
+                        (unsigned)DOOR_AUTO_CLOSE_MIN_MS,
+                        (unsigned)DOOR_AUTO_CLOSE_MAX_MS);
             return;
         }
 
@@ -287,12 +304,25 @@ void Cmd_Process(void)
             return;
         }
 
-        /* Persist so the setting survives a power cut. */
-        (void)Log_SetAutoCloseMs((uint16_t)value);
+        /* Persist so the setting survives a power cut. The result is REPORTED,
+           not discarded: if the EEPROM write failed the setting is live but will
+           revert on the next boot, and saying a bare "OK" would hide that. The
+           command still counts as applied, because it did change the running
+           configuration. */
+        persistOk = (Log_SetAutoCloseMs((uint16_t)value) == MYI2C_OK) ? 1U : 0U;
+
         Log_Add(LOG_EVT_PARAM_CHANGE, (uint8_t)Door_GetState(),
                 (uint8_t)Door_GetMode(), 0U);
 
-        UART_Printf("OK DELAY=%u\r\n", (unsigned)value);
+        if (persistOk != 0U)
+        {
+            UART_Printf("OK DELAY=%u\r\n", (unsigned)value);
+        }
+        else
+        {
+            UART_Printf("OK DELAY=%u (NOT PERSISTED - eeprom write failed)\r\n",
+                        (unsigned)value);
+        }
         return;
     }
 
@@ -301,6 +331,7 @@ void Cmd_Process(void)
     {
         const char *arg = &line[5];
         DoorMode_t  m;
+        uint8_t     persistOk;
 
         if (strcmp(arg, "AUTO") == 0)
         {
@@ -317,10 +348,22 @@ void Cmd_Process(void)
         }
 
         Door_SetMode(m);
-        (void)Log_SetPersistedMode((uint8_t)m);
+
+        /* Report the persistence result rather than discarding it - see the note
+           in the DELAY handler. */
+        persistOk = (Log_SetPersistedMode((uint8_t)m) == MYI2C_OK) ? 1U : 0U;
+
         Log_Add(LOG_EVT_MODE_CHANGE, (uint8_t)Door_GetState(), (uint8_t)m, 0U);
 
-        UART_Printf("OK MODE=%s\r\n", mode_name(m));
+        if (persistOk != 0U)
+        {
+            UART_Printf("OK MODE=%s\r\n", mode_name(m));
+        }
+        else
+        {
+            UART_Printf("OK MODE=%s (NOT PERSISTED - eeprom write failed)\r\n",
+                        mode_name(m));
+        }
         return;
     }
 
@@ -404,19 +447,32 @@ void Cmd_Process(void)
     /* ---- DEFAULTS ------------------------------------------------------- */
     if (strcmp(line, "DEFAULTS") == 0)
     {
+        uint8_t persistOk;
+
         /* The log is NOT cleared here. Losing history because someone asked for
            default settings would be a surprising and irreversible side effect. */
         Door_SetAutoCloseMs(DOOR_AUTO_CLOSE_MS);
-        (void)Log_SetAutoCloseMs(DOOR_AUTO_CLOSE_MS);
-
         Door_SetMode(DOOR_MODE_AUTO);
-        (void)Log_SetPersistedMode((uint8_t)DOOR_MODE_AUTO);
+
+        /* Both writes are reported, not discarded. */
+        persistOk = ((Log_SetAutoCloseMs(DOOR_AUTO_CLOSE_MS) == MYI2C_OK) &&
+                     (Log_SetPersistedMode((uint8_t)DOOR_MODE_AUTO) == MYI2C_OK))
+                    ? 1U : 0U;
 
         Log_Add(LOG_EVT_PARAM_CHANGE, (uint8_t)Door_GetState(),
                 (uint8_t)DOOR_MODE_AUTO, 0U);
 
-        UART_Printf("OK DEFAULTS delay=%ums mode=AUTO (log kept)\r\n",
-                    (unsigned)DOOR_AUTO_CLOSE_MS);
+        if (persistOk != 0U)
+        {
+            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO (log kept)\r\n",
+                        (unsigned)DOOR_AUTO_CLOSE_MS);
+        }
+        else
+        {
+            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO "
+                        "(NOT PERSISTED - eeprom write failed)\r\n",
+                        (unsigned)DOOR_AUTO_CLOSE_MS);
+        }
         return;
     }
 
