@@ -118,6 +118,13 @@ void Cmd_ReportStatus(void)
     UART_Printf(" DELAY=%ums", (unsigned)Door_GetAutoCloseMs());
     UART_Printf(" CNT=%u", (unsigned)Log_Count());
     UART_Printf(" TOTAL=%lu", (unsigned long)Log_TotalEvents());
+
+    /* Only shown when non-zero: a healthy log should not clutter the line, but a
+       silently failing one must not be invisible either. */
+    if (Log_DroppedCount() != 0U)
+    {
+        UART_Printf(" DROPPED=%u", (unsigned)Log_DroppedCount());
+    }
     UART_Printf(" LIM=%u/%u", (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed());
     UART_Printf(" I2C=%s", (MyI2C_IsIdle() != 0U) ? "ok" : "STUCK");
     UART_SendLine();

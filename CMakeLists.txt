@@ -77,6 +77,7 @@ set(APP_SOURCES_LIST
   App/Door.c
   App/Cmd.c
   App/Display.c
+  App/Display_Oled.c
   App/Fmt.c
 )
 

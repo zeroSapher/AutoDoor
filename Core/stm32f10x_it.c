@@ -35,6 +35,7 @@
 #include "Key.h"
 #include "Buzzer.h"
 #include "StatusLed.h"
+#include "Log.h"
 
 /*===========================================================================*/
 /*  Cortex-M3 core exceptions                                                */
@@ -109,6 +110,15 @@ void SysTick_Handler(void)
     Key_Tick1ms();
     Buzzer_Tick1ms();
     StatusLed_Tick1ms();
+
+    /*
+     * Log_Tick1ms() MUST be here. Without it the event log never flushes on its
+     * own: entries queue up in RAM and are only written when a burst happens to
+     * fill the batch, so in normal operation (a few events per minute) nothing
+     * ever reaches the EEPROM and a power cut loses all of it. The whole
+     * persistent-storage feature depends on this one line.
+     */
+    Log_Tick1ms();
 }
 
 /*===========================================================================*/

@@ -75,6 +75,7 @@ static uint8_t     s_ready = 0U;
    dropped rather than corrupting the buffer. */
 static LogEntry_t  s_pending[LOG_FLUSH_BATCH];
 static uint8_t     s_pendingCount = 0U;
+static uint16_t    s_droppedEvents = 0U;   /* events lost because the queue stayed full */
 static uint16_t    s_flushTimerMs = 0U;
 
 static uint16_t    s_seqCounter   = 0U;
@@ -282,6 +283,7 @@ uint8_t Log_Init(void)
     s_hdr.delayMs     = DOOR_AUTO_CLOSE_MS;
     s_hdr.mode        = 0U;
     s_hdr.seqNext     = 0U;
+    s_droppedEvents   = 0U;
     s_hdr.bootId      = 0U;
     s_hdr.totalEvents = 0U;
 
@@ -433,6 +435,24 @@ void Log_Add(LogEvent_t event, uint8_t doorState, uint8_t mode, uint16_t duratio
         Log_Flush();
     }
 
+    /*
+     * The flush above can FAIL - the EEPROM is unreachable, or its internal
+     * write cycle is still running - and on failure Log_Flush() deliberately
+     * leaves s_pendingCount untouched so the entries are not lost. That means
+     * this function can still arrive here with the queue full, and writing to
+     * s_pending[LOG_FLUSH_BATCH] would run one past the end of the array and
+     * corrupt whatever follows it in .bss.
+     *
+     * So the boundary is re-checked AFTER the flush. An event that cannot be
+     * queued is dropped and counted; losing a log line is bad, corrupting the
+     * door state is worse.
+     */
+    if (s_pendingCount >= LOG_FLUSH_BATCH)
+    {
+        s_droppedEvents++;
+        return;
+    }
+
     e = &s_pending[s_pendingCount];
 
     e->seq         = s_seqCounter++;
@@ -451,6 +471,11 @@ void Log_Add(LogEvent_t event, uint8_t doorState, uint8_t mode, uint16_t duratio
     s_hdr.seqNext = s_seqCounter;
 
     s_pendingCount++;
+}
+
+uint16_t Log_DroppedCount(void)
+{
+    return s_droppedEvents;
 }
 
 /*===========================================================================*/

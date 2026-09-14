@@ -105,6 +105,14 @@ void Log_Add(LogEvent_t event, uint8_t doorState, uint8_t mode, uint16_t duratio
 /** @return Number of records currently stored (0..LOG_SLOT_COUNT). */
 uint16_t Log_Count(void);
 
+/**
+  * @brief  Events that could not be queued because the EEPROM stayed unreachable.
+  * @note   Exposed so a failing log is visible rather than silent: the queue is
+  *         deliberately bounded, and an event that cannot be queued is dropped
+  *         instead of overrunning the buffer. Report this in STATUS?.
+  */
+uint16_t Log_DroppedCount(void);
+
 /** @return Total events ever recorded on this unit (survives ring wrap). */
 uint64_t Log_TotalEvents(void);
 
