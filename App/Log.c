@@ -1,4 +1,4 @@
-/**
+﻿/**
   ******************************************************************************
   * @file    Log.c
   * @brief   Persistent event log: RAM queue backed by the AT24C32 EEPROM.
@@ -107,17 +107,39 @@
  * therefore never be used as the record stride, as an EEPROM_Write length, or as
  * a memcpy size - doing so would write 20-byte records over 16-byte slots.
  *
- * That confusion is exactly what an earlier comment in Log.h invited by calling
- * the struct "16 bytes". These asserts pin the wire layout instead of the
- * struct: they fail the build if a field width changes without the offsets in
- * record_write()/record_read() being re-derived. tools/check-log-layout.py
- * verifies the same thing more thoroughly from the outside.
+ * WHAT THESE ASSERTS COVER, AND WHAT THEY DO NOT - an earlier version of this
+ * comment claimed more than the code did, which is worse than claiming nothing:
+ *
+ *   - COVERED: the sum of the struct's stored field sizes still equals
+ *     LOG_ENTRY_SIZE. Widening or narrowing a stored field fails the build. The
+ *     sum is written in terms of sizeof(member), not of literal numbers, so it
+ *     actually tracks the struct; the first version used literals and could not
+ *     fail for any edit to the struct at all.
+ *   - COVERED: the struct is still larger than the wire record, so the warnings
+ *     above remain true.
+ *   - NOT COVERED: the byte offsets in record_write()/record_read(), and the
+ *     pairing of a field with its offset. Those are literals, and no C construct
+ *     checks them. Transposing two same-width fields there (say writing
+ *     e->doorState to byte 8 and e->event to byte 9) compiles cleanly and is
+ *     invisible here. tools/check-log-layout.py is the guard for that: it parses
+ *     the offsets and the member names and cross-checks the write against the
+ *     read. Do not read these asserts as covering it.
  */
-_Static_assert((2U + 4U + 2U + 1U + 1U + 1U + 2U + 2U + 1U) == LOG_ENTRY_SIZE,
-               "the packed record fields no longer fill LOG_ENTRY_SIZE");
-_Static_assert(sizeof(LogEntry_t) != LOG_ENTRY_SIZE,
-               "LogEntry_t unexpectedly matches the wire size - recheck the "
-               "byte-packing comments, which assume the two differ");
+_Static_assert((sizeof(((LogEntry_t *)0)->seq) +
+                sizeof(((LogEntry_t *)0)->timestampMs) +
+                sizeof(((LogEntry_t *)0)->bootId) +
+                sizeof(((LogEntry_t *)0)->event) +
+                sizeof(((LogEntry_t *)0)->doorState) +
+                sizeof(((LogEntry_t *)0)->mode) +
+                sizeof(((LogEntry_t *)0)->durationMs) +
+                2U  /* generation, kept in reserved[0..1] */ +
+                1U  /* reserved[2] */) == LOG_ENTRY_SIZE,
+               "the stored fields no longer fill LOG_ENTRY_SIZE - update the "
+               "offsets in record_write()/record_read() and LOG_VERSION");
+
+_Static_assert(sizeof(LogEntry_t) > LOG_ENTRY_SIZE,
+               "LogEntry_t now fits the wire record exactly, so the byte-packing "
+               "and the sizeof() warnings above are misleading - recheck them");
 
 /*===========================================================================*/
 /*  Internal state                                                           */
@@ -424,68 +446,36 @@ static uint8_t rebuild_from_records(uint16_t *newestSeqOut)
 }
 
 /**
-  * @brief  Highest generation stamp present anywhere in the record area.
-  * @return The maximum stamp over all non-blank records, or 0 when there are
-  *         none.
-  * @note   Used to pick the generation for a fresh header, and it is read from
-  *         the ring rather than derived from the header on purpose: the header
-  *         can LAG the stamps. A clear whose header write fails leaves the
-  *         persisted generation behind while subsequent record writes - which
-  *         target different pages and may well succeed - stamp records with the
-  *         already-incremented value. Choosing headerGeneration + 1 would then
-  *         land exactly on the stamp those records carry, and the next boot's
-  *         scan would count them: the resurrection bug the generation field
-  *         exists to prevent, reached by a different route.
-  * @note   The comparison is a plain numeric maximum, not the wrap-safe signed
-  *         one used for sequence numbers. That is deliberate: generation is a
-  *         monotonic counter, and if it has wrapped the caller's next step is a
-  *         full erase anyway.
+  * @brief  Write a brand-new header over a blanked record area.
+  * @param  oldHdr  A readable header from an older record layout, or 0 for a
+  *                 blank/foreign device. When non-0 the configuration and the
+  *                 lifetime counters are carried over: only the record layout is
+  *                 version-specific, so a firmware upgrade should reset the log
+  *                 and nothing else.
+  * @return 0 on success, non-zero if the ring could not be blanked or the header
+  *         page could not be written.
+  * @note   The record area is blanked UNCONDITIONALLY, and the generation is then
+  *         simply LOG_GENERATION_INIT.
+  *
+  *         Two earlier versions of this tried to be cleverer - "old generation +
+  *         1", then "max(header, highest stamp found in the ring) + 1" - and both
+  *         were wrong for the same reason: they assumed something could be known
+  *         about the ring that cannot be. The header can lag the stamps (a clear
+  *         whose header write failed, followed by record writes that succeeded),
+  *         and any scan of the ring is incomplete by construction, because a slot
+  *         that fails every read attempt hides its stamp. Either way the computed
+  *         generation can land exactly on a stamp that is physically present, and
+  *         the next scan then counts those records as live.
+  *
+  *         Blanking removes the question. With every slot reading 0xFF the empty
+  *         test in rebuild_from_records() skips them whatever the generation is,
+  *         so no arithmetic over unknown data is needed at all. It costs 252 page
+  *         writes (~1.3 s) and happens only when the header is unreadable or the
+  *         record layout changed - i.e. once per device, or once per firmware
+  *         version bump, before the main loop is even running. That is a cheap
+  *         price for not having to reason about unreadable slots.
   */
-static uint16_t scan_max_stamp(void)
-{
-    LogEntry_t e;
-    uint16_t   i;
-    uint16_t   maxStamp = 0U;
-
-    for (i = 0U; i < LOG_SLOT_COUNT; i++)
-    {
-        uint16_t stamp;
-
-        if (record_read(i, &e) != MYI2C_OK)
-        {
-            continue;
-        }
-
-        /* Blank slots read back as 0xFF, so their stamp bytes are 0xFFFF and
-           mean nothing. Filter them on the event byte first. */
-        if ((e.event == 0xFFU) || (e.event == LOG_EVT_NONE))
-        {
-            continue;
-        }
-
-        stamp = (uint16_t)((uint16_t)e.reserved[0] | ((uint16_t)e.reserved[1] << 8));
-        if (stamp > maxStamp)
-        {
-            maxStamp = stamp;
-        }
-    }
-
-    return maxStamp;
-}
-
-/**
-  * @brief  Write a brand-new header: empty ring, given generation.
-  * @param  generation  Erase generation to start from. Must not be one that is
-  *                     already stamped on any record still in the ring - the
-  *                     caller derives it from scan_max_stamp().
-  * @param  oldHdr      A readable header from an older record layout, or 0 for a
-  *                     blank/foreign device. When non-0 the configuration and the
-  *                     lifetime counters are carried over: only the record layout
-  *                     is version-specific, so a firmware upgrade should reset
-  *                     the log and nothing else.
-  * @return 0 on success, non-zero if the header page could not be written.
-  */
-static uint8_t initialise_fresh(uint16_t generation, const uint8_t *oldHdr)
+static uint8_t initialise_fresh(const uint8_t *oldHdr)
 {
     uint16_t preservedDelay = DOOR_AUTO_CLOSE_MS;
     uint8_t  preservedMode  = 0U;
@@ -515,19 +505,16 @@ static uint8_t initialise_fresh(uint16_t generation, const uint8_t *oldHdr)
         }
     }
 
-    if (generation == 0U)
+    /*
+     * If this fails part way the ring is a mix of blank and live slots, which is
+     * exactly the state that makes Log_Get() return erased slots as records - so
+     * do not pretend the log is usable. Reporting it as unavailable routes the
+     * application down the existing degradation path, where the door still runs
+     * and the console says plainly what is missing.
+     */
+    if (erase_all_slots() != 0U)
     {
-        /*
-         * The caller's generation wrapped past 0, which is the one value that
-         * repeats. Blanking the record area is the only way to make the reused
-         * generation safe, so it is done here rather than silently stamping
-         * records with a generation that old data already carries.
-         */
-        if (erase_all_slots() != 0U)
-        {
-            return 1U;
-        }
-        generation = LOG_GENERATION_INIT;
+        return 1U;
     }
 
     s_hdr.count       = 0U;
@@ -536,7 +523,7 @@ static uint8_t initialise_fresh(uint16_t generation, const uint8_t *oldHdr)
     s_hdr.mode        = preservedMode;
     s_hdr.seqNext     = preservedSeq;
     s_hdr.bootId      = firstBootId;
-    s_hdr.generation  = generation;
+    s_hdr.generation  = LOG_GENERATION_INIT;
     s_hdr.totalEvents = preservedTotal;
 
     s_seqCounter = s_hdr.seqNext;
@@ -594,36 +581,16 @@ uint8_t Log_Init(void)
 
     /*
      * A blank or foreign device, or one written by an older record layout, gets
-     * a fresh ring.
+     * a fresh ring: the record area is blanked and the header rewritten. See the
+     * note on initialise_fresh() for why "blank it" beats any attempt to compute
+     * a generation that avoids the stamps already present.
      *
-     * The generation must not already be stamped on anything still in the ring,
-     * so it is derived from the ring itself (scan_max_stamp) rather than from the
-     * header. The header can lag the stamps, and headerGeneration + 1 would then
-     * collide exactly - see the note on scan_max_stamp() for the sequence that
-     * produces that. This is why the earlier "old generation + 1" version of this
-     * code was still wrong: it trusted a field the code itself can leave stale.
-     *
-     * A blank/foreign device has no trustworthy header at all, so only the ring
-     * is consulted; a readable-but-old header also contributes its generation,
-     * since it may be ahead of anything currently stored.
+     * Only the record layout is version-specific, so when the magic is intact
+     * the configuration and the lifetime counters are carried over.
      */
     if ((magicOk == 0U) || (get16(&hdr[HDR_OFF_VERSION]) != LOG_VERSION))
     {
-        uint16_t maxStamp = scan_max_stamp();
-        uint16_t startGen;
-
-        if (magicOk == 0U)
-        {
-            startGen = (uint16_t)(maxStamp + 1U);
-        }
-        else
-        {
-            uint16_t hdrGen = get16(&hdr[HDR_OFF_GENERATION]);
-
-            startGen = (uint16_t)(((hdrGen > maxStamp) ? hdrGen : maxStamp) + 1U);
-        }
-
-        if (initialise_fresh(startGen, (magicOk != 0U) ? hdr : 0) != 0U)
+        if (initialise_fresh((magicOk != 0U) ? hdr : 0) != 0U)
         {
             return 3U;
         }
@@ -1099,16 +1066,27 @@ uint8_t Log_Clear(void)
     {
         uint8_t rc = header_write();
 
-        /* Keep the retry-pacing flag honest: a successful clear proves the bus
-           works, a failed one is exactly the condition the backoff exists for.
-           A failed clear also leaves the EEPROM header describing the previous
-           generation while RAM has moved on, so the header is marked dirty and
-           Log_Flush() will publish the new generation - and, with it, make the
-           clear actually take effect - as soon as the bus recovers. */
+        /*
+         * Keep the retry-pacing flag honest: a successful clear proves the bus
+         * works, a failed one is exactly the condition the backoff exists for.
+         * A failed clear also leaves the EEPROM header describing the previous
+         * generation while RAM has moved on, so the header is marked dirty and
+         * Log_Flush() will publish the new generation - and, with it, make the
+         * clear actually take effect - as soon as the bus recovers.
+         *
+         * The return is normalised to the documented 0/1 contract, NOT passed
+         * through raw. header_write() returns a MYI2C_* code, and
+         * MYI2C_ERR_TIMEOUT happens to be 2 - the value Log.h and Cmd.c reserve
+         * for "the generation-wrap erase was incomplete". Returning rc directly
+         * meant an ordinary header-write timeout reported "clear incomplete, 0
+         * records remain", which is actively misleading: the clear DID succeed in
+         * RAM and no erase was attempted. 2 is now returned only by the erase
+         * path above.
+         */
         s_flushFailed = (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
         s_headerDirty = (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
 
-        return rc;
+        return (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
     }
 }
 
