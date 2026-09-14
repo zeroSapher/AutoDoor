@@ -136,10 +136,29 @@ void Cmd_ReportStatus(void)
 
 static void cmd_log(uint16_t want)
 {
-    uint16_t count = Log_Count();
+    uint16_t count;
     uint16_t i;
     uint16_t start;
     LogEntry_t e;
+
+    /*
+     * Persist before reporting. Without this the most recent events - up to
+     * LOG_FLUSH_INTERVAL_MS old - are still in the RAM queue and invisible here,
+     * so a user who watched the door move and immediately asked for the log would
+     * be told it never happened. Log.h has documented "flush before reporting
+     * counts" from the start; this is where that promise is actually kept.
+     *
+     * A failure is reported rather than papered over: showing a list that is
+     * silently missing the newest records is worse than saying the EEPROM is
+     * unavailable, because the list looks complete.
+     */
+    if (Log_Flush() != 0U)
+    {
+        UART_SendString("ERR EEPROM (log not fully persisted)\r\n");
+        return;
+    }
+
+    count = Log_Count();
 
     if (count == 0U)
     {

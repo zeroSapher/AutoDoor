@@ -65,7 +65,7 @@ typedef struct
     uint8_t  doorState;     /* DoorState_t after the event                   */
     uint8_t  mode;          /* 0 = AUTO, 1 = MANUAL                          */
     uint16_t durationMs;    /* travel time for OPEN_DONE / CLOSE_DONE        */
-    uint8_t  reserved[3];
+    uint8_t  reserved[3];   /* [0..1] = erase generation, [2] unused        */
 } LogEntry_t;
 
 /*===========================================================================*/
@@ -81,11 +81,27 @@ typedef struct
   */
 uint8_t Log_Init(void);
 
-/** @brief Advance the flush timer and write pending records; call per ms. */
+/**
+  * @brief Advance the flush timer; call per ms from the tick handler.
+  * @note  This only *requests* a flush - it never touches the EEPROM, because it
+  *        runs in interrupt context and an EEPROM write blocks for ~5 ms.
+  */
 void Log_Tick1ms(void);
 
-/** @brief Force a flush now (used before reporting counts and on shutdown). */
-void Log_Flush(void);
+/** @brief Ask for a flush. Safe to call from any context, including an ISR. */
+void Log_RequestFlush(void);
+
+/** @brief Service a pending flush request. Call once per main-loop iteration. */
+void Log_Process(void);
+
+/**
+  * @brief  Force a flush now.
+  * @return 0 when everything pending reached the EEPROM, non-zero otherwise.
+  * @note   MAIN LOOP ONLY: it performs tens of milliseconds of blocking I2C on a
+  *         bus shared with the display. Interrupt context must use
+  *         Log_RequestFlush() and let Log_Process() do the work.
+  */
+uint8_t Log_Flush(void);
 
 /*===========================================================================*/
 /*  Recording                                                                */
@@ -97,8 +113,10 @@ void Log_Flush(void);
   * @param  doorState  DoorState_t in effect after the event.
   * @param  mode       0 = AUTO, 1 = MANUAL.
   * @param  durationMs Travel time, or 0 when not applicable.
-  * @note   Never blocks and never touches the EEPROM, so it is safe to call from
-  *         anywhere including shortly after an interrupt.
+  * @note   Never blocks and never touches the EEPROM - it only sets a flush
+  *         request, which Log_Process() serves from the main loop. This is what
+  *         makes it safe to call from anywhere including shortly after an
+  *         interrupt.
   */
 void Log_Add(LogEvent_t event, uint8_t doorState, uint8_t mode, uint16_t durationMs);
 
@@ -122,7 +140,17 @@ uint64_t Log_TotalEvents(void);
   */
 uint8_t Log_Get(uint16_t index, LogEntry_t *out);
 
-/** @brief Erase every record (writes a fresh header, keeps the sequence). */
+/**
+  * @brief  Erase every record.
+  * @return 0 on success, 1 when the log is unavailable, 2 when the rare
+  *         generation-wrap erase could not be completed.
+  * @note   Implemented as a generation bump in the header, so it costs a single
+  *         32-byte page write instead of 252. Records are stamped with the
+  *         generation and only counted when it matches, which is what makes the
+  *         clear survive a reboot. The lifetime event counter and the sequence
+  *         number are deliberately NOT reset - "how many events has this door
+  *         ever seen" is a property of the unit, not of the current log.
+  */
 uint8_t Log_Clear(void);
 
 /*===========================================================================*/

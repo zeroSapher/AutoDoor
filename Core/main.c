@@ -335,6 +335,17 @@ int main(void)
         Cmd_Process();
 
         /*
+         * Service the event log. All EEPROM traffic lives here and not in the
+         * tick handler: a flush is tens of milliseconds of blocking I2C, and
+         * doing it inside SysTick stalled the UART and could interleave a second
+         * transaction with one already in flight in this loop. The 1 ms tick only
+         * sets a request flag. It runs after Cmd_Process() so a LOG? command's
+         * own flush is not repeated here, and before the panel refresh so the
+         * record count shown is the one that was just persisted.
+         */
+        Log_Process();
+
+        /*
          * Refresh the panel a few times a second, not every iteration. A full
          * OLED flush is ~1 KB of I2C, and the bus is shared with the EEPROM, so
          * repainting at loop speed would both waste time and add bus contention.

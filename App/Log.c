@@ -13,14 +13,48 @@
   *   +12 mode       1 byte   0 = AUTO, 1 = MANUAL
   *   +13 seqNext    2 bytes  next record sequence number
   *   +15 bootId     2 bytes  power-cycle counter
-  *   +17 reserved   2 bytes
+  *   +17 generation 2 bytes  erase generation (see CLEARING below)
   *   +19 totalLo    4 bytes  lifetime event counter, low 32 bits
   *   +23 totalHi    4 bytes  lifetime event counter, high 32 bits
   *   +27 reserved   5 bytes
   *
   * The header is rewritten whenever a record is flushed. That is one extra
   * 32-byte page write per batch, which is affordable precisely because writes
-  * are batched rather than per-event.
+  * are batched rather than per-event. It is also exactly one AT24C32 page, so a
+  * header write is a single page write and cannot be split.
+  *
+  * CLEARING (why there is a generation field)
+  * -----------------------------------------
+  * Log_Clear() has to make every stored record invisible, including after the
+  * next power-up - rebuild_from_records() reconstructs the ring by scanning the
+  * record area, so simply zeroing the header is not enough.
+  *
+  * The first attempt physically rewrote all 252 slots blank. That is wrong on
+  * two counts: it blocks the main loop for well over a second (during which the
+  * door state machine does not run at all, including the level-triggered
+  * reversal safety net), and it burns 252 EEPROM write cycles per clear.
+  *
+  * Instead every record carries a copy of the header's generation counter, and a
+  * record only counts when the two match. Clearing therefore becomes "increment
+  * the generation, reset count/wrIndex, write the header" - one 32-byte page
+  * write that atomically invalidates every existing record. A power cut during
+  * the clear leaves the old generation in place, so the outcome is either
+  * "cleared" or "not cleared", never a half-erased ring.
+  *
+  * The counter is 16-bit. After 65535 clears it would repeat, which would
+  * resurrect records that old, so the wrap is handled by physically erasing the
+  * record area exactly once per 65535 clears. The resurrection hazard is bounded
+  * and the cost is paid once, not once per clear.
+  *
+  * WHERE THE EEPROM IS TOUCHED (important)
+  * ---------------------------------------
+  * EEPROM writes block for ~5 ms each. The 1 ms SysTick handler therefore only
+  * ever *requests* a flush; the actual writes happen in Log_Process(), called
+  * from the main loop. Doing those writes in SysTick cost 45 ms of interrupt
+  * context per batch: it stalled the UART (one byte per 87 us at 115200, so
+  * hundreds of dropped received characters) and it could interleave a second
+  * EEPROM transaction with one already in progress in the main loop, corrupting
+  * both. Log_Add() and Log_Tick1ms() never touch the bus at all.
   ******************************************************************************
   */
 
@@ -43,6 +77,7 @@
 #define HDR_OFF_MODE        12U
 #define HDR_OFF_SEQ_NEXT    13U
 #define HDR_OFF_BOOT_ID     15U
+#define HDR_OFF_GENERATION  17U
 #define HDR_OFF_TOTAL_LO    19U
 #define HDR_OFF_TOTAL_HI    23U
 
@@ -50,7 +85,17 @@
 #define LOG_MAGIC_1         'D'
 #define LOG_MAGIC_2         'R'
 #define LOG_MAGIC_3         'M'
-#define LOG_VERSION         1U
+
+/* 2 since records gained the generation field (offset 13..14 of the record,
+   previously reserved and written as zero). A version-1 header is rebuilt from
+   scratch: its records read back as generation 0 while the new header starts at
+   generation 1, so they are ignored rather than misinterpreted. Nothing has been
+   deployed, so this costs nobody a log. */
+#define LOG_VERSION         2U
+
+/* Generation written on a freshly initialised unit. Never 0, so that records
+   left over from a version-1 layout (generation 0) are never accepted. */
+#define LOG_GENERATION_INIT 1U
 
 /*===========================================================================*/
 /*  Internal state                                                           */
@@ -64,6 +109,7 @@ typedef struct
     uint8_t  mode;
     uint16_t seqNext;
     uint16_t bootId;
+    uint16_t generation;    /* bumped by Log_Clear(); records must match */
     uint64_t totalEvents;   /* 64-bit so the lifetime counter never wraps */
 } LogHeader_t;
 
@@ -77,6 +123,25 @@ static LogEntry_t  s_pending[LOG_FLUSH_BATCH];
 static uint8_t     s_pendingCount = 0U;
 static uint16_t    s_droppedEvents = 0U;   /* events lost because the queue stayed full */
 static uint16_t    s_flushTimerMs = 0U;
+
+/* Number of entries at the head of s_pending[] that are already in the EEPROM.
+   A flush that fails part way through must resume *after* the committed prefix:
+   retrying from zero would rewrite those records into fresh slots, duplicating
+   them in the ring and counting them twice in the lifetime total. */
+static uint8_t     s_flushProgress = 0U;
+
+/* Set by Log_Add()/Log_Tick1ms() (possibly from an interrupt) and consumed by
+   Log_Process() in the main loop, which is the only place that touches the bus. */
+static volatile uint8_t s_flushRequest = 0U;
+static uint8_t          s_flushing = 0U;
+
+/* Last flush attempt failed (EEPROM unreachable or still in its write cycle).
+   While this is set, the "queue is full, flush now" fast path is disabled so
+   retries are paced by LOG_FLUSH_INTERVAL_MS instead. Without it a full queue
+   plus a dead EEPROM would attempt a write on every main-loop iteration, and
+   each failed attempt costs a full EEPROM_WRITE_TIMEOUT_MS of busy polling -
+   the door state machine would be starved by a bus that is not answering. */
+static uint8_t          s_flushFailed = 0U;
 
 static uint16_t    s_seqCounter   = 0U;
 /*===========================================================================*/
@@ -121,6 +186,9 @@ static uint16_t slot_address(uint16_t index)
     return (uint16_t)(LOG_HEADER_SIZE + (index * LOG_ENTRY_SIZE));
 }
 
+/* Defined below; used by initialise_fresh() for the generation wrap. */
+static uint8_t erase_all_slots(void);
+
 static uint8_t header_write(void)
 {
     uint8_t buf[LOG_HEADER_SIZE];
@@ -139,6 +207,7 @@ static uint8_t header_write(void)
     buf[HDR_OFF_MODE] = s_hdr.mode;
     put16(&buf[HDR_OFF_SEQ_NEXT], s_hdr.seqNext);
     put16(&buf[HDR_OFF_BOOT_ID],  s_hdr.bootId);
+    put16(&buf[HDR_OFF_GENERATION], s_hdr.generation);
     put32(&buf[HDR_OFF_TOTAL_LO], s_hdr.totalEvents & 0xFFFFFFFFUL);
     put32(&buf[HDR_OFF_TOTAL_HI], (uint32_t)(s_hdr.totalEvents >> 32));
 
@@ -158,6 +227,7 @@ static uint8_t record_write(uint16_t slot, const LogEntry_t *e)
     buf[9]  = e->doorState;
     buf[10] = e->mode;
     put16(&buf[11], e->durationMs);
+    put16(&buf[13], s_hdr.generation);   /* record validity stamp */
 
     return EEPROM_Write(slot_address(slot), buf, LOG_ENTRY_SIZE);
 }
@@ -192,14 +262,23 @@ static uint8_t record_read(uint16_t slot, LogEntry_t *e)
 /*===========================================================================*/
 
 /**
-  * @brief  Recover the ring position and counters by scanning the record area.
+  * @brief  Recover the ring position and count by scanning the record area.
+  * @param  newestSeqOut  Receives the highest sequence number found (only valid
+  *                       when the return value is non-zero).
+  * @return 1 when at least one valid record was found, 0 when the ring is empty.
   * @note   The newest record is identified by the largest sequence number,
   *         compared as a signed 16-bit difference so that the wrap from 65535
   *         back to 0 is handled correctly. Scanning is used rather than trusting
   *         the stored write index because a power cut during a flush could leave
   *         the index ahead of the data; the data is always the truth.
+  * @note   This function deliberately does NOT touch s_hdr.totalEvents. It used
+  *         to zero it, which silently destroyed the lifetime counter on every
+  *         boot: Log_Init() loads the counter from the header, called this, and
+  *         then wrote the zeroed value straight back. The counter is owned by
+  *         Log_Init() and Log_Flush(); a ring rebuild has no business resetting
+  *         it.
   */
-static void rebuild_from_records(void)
+static uint8_t rebuild_from_records(uint16_t *newestSeqOut)
 {
     LogEntry_t e;
     uint16_t   i;
@@ -207,21 +286,30 @@ static void rebuild_from_records(void)
     uint16_t   newestSeq  = 0U;
     uint16_t   found      = 0U;
 
-    s_hdr.count       = 0U;
-    s_hdr.wrIndex     = 0U;
-    s_hdr.totalEvents = 0U;
+    s_hdr.count   = 0U;
+    s_hdr.wrIndex = 0U;
 
     for (i = 0U; i < LOG_SLOT_COUNT; i++)
     {
+        uint16_t recGen;
+
         if (record_read(i, &e) != MYI2C_OK)
         {
             continue;
         }
 
-        /* A blank slot reads as all 0xFF. Event 0xFF is never valid, and a
-           genuine record can never have 0xFFFF as its sequence AND 0xFF as its
-           event at the same time, so this is a safe "empty" test. */
+        /* A blank slot reads as all 0xFF. Event 0xFF is never valid, so this is
+           a safe "empty" test on its own, and it also covers the generation
+           bytes of a blank slot (0xFFFF) whatever the header says. */
         if ((e.event == 0xFFU) || (e.event == LOG_EVT_NONE))
+        {
+            continue;
+        }
+
+        /* A record only counts if it belongs to the current generation. This is
+           what makes Log_Clear() take effect across a power cycle. */
+        recGen = (uint16_t)((uint16_t)e.reserved[0] | ((uint16_t)e.reserved[1] << 8));
+        if (recGen != s_hdr.generation)
         {
             continue;
         }
@@ -249,27 +337,95 @@ static void rebuild_from_records(void)
     {
         s_hdr.count   = 0U;
         s_hdr.wrIndex = 0U;
-        return;
     }
-
-    /* Slots are used in ascending order and wrap, so the slot after the newest
-       one is the first free (or oldest) slot. */
-    s_hdr.wrIndex = (uint16_t)((newestSlot + 1U) % LOG_SLOT_COUNT);
-
-    /* If the ring wrapped, every slot is populated and the oldest is the one
-       right after the newest. `count` is capped at the capacity either way. */
-    if (s_hdr.count > LOG_SLOT_COUNT)
+    else
     {
-        s_hdr.count = LOG_SLOT_COUNT;
+        /* Slots are used in ascending order and wrap, so the slot after the
+           newest one is the first free (or oldest) slot. */
+        s_hdr.wrIndex = (uint16_t)((newestSlot + 1U) % LOG_SLOT_COUNT);
+
+        /* If the ring wrapped, every slot is populated and the oldest is the one
+           right after the newest. `count` is capped at the capacity either way. */
+        if (s_hdr.count > LOG_SLOT_COUNT)
+        {
+            s_hdr.count = LOG_SLOT_COUNT;
+        }
     }
+
+    /* Sanity floor: the unit has recorded at least as many events as survive in
+       the ring. A corrupted or truncated header would otherwise report
+       "CNT=37 TOTAL=0", which reads as a firmware fault. */
+    if (s_hdr.totalEvents < (uint64_t)s_hdr.count)
+    {
+        s_hdr.totalEvents = (uint64_t)s_hdr.count;
+    }
+
+    if (newestSeqOut != 0)
+    {
+        *newestSeqOut = newestSeq;
+    }
+
+    return (uint8_t)((found != 0U) ? 1U : 0U);
+}
+
+/**
+  * @brief  Write a brand-new header: empty ring, defaults, given generation.
+  * @param  generation  Erase generation to start from. Must never be one that
+  *                     could already be stamped on records still in the ring -
+  *                     that is why the caller passes a monotonically increasing
+  *                     value rather than always 1.
+  * @return 0 on success, non-zero if the header page could not be written.
+  */
+static uint8_t initialise_fresh(uint16_t generation)
+{
+    if (generation == 0U)
+    {
+        /*
+         * The caller's generation wrapped past 0, which is the one value that
+         * repeats. Blanking the record area is the only way to make the reused
+         * generation safe, so it is done here rather than silently stamping
+         * records with a generation that old data already carries.
+         */
+        if (erase_all_slots() != 0U)
+        {
+            return 1U;
+        }
+        generation = LOG_GENERATION_INIT;
+    }
+
+    s_hdr.count       = 0U;
+    s_hdr.wrIndex     = 0U;
+    s_hdr.delayMs     = DOOR_AUTO_CLOSE_MS;
+    s_hdr.mode        = 0U;
+    s_hdr.seqNext     = 0U;
+    s_hdr.bootId      = 1U;
+    s_hdr.generation  = generation;
+    s_hdr.totalEvents = 0U;
+
+    s_seqCounter = 0U;
+
+    if (header_write() != MYI2C_OK)
+    {
+        return 1U;
+    }
+
+    s_ready = 1U;
+    return 0U;
 }
 
 uint8_t Log_Init(void)
 {
-    uint8_t hdr[LOG_HEADER_SIZE];
+    uint8_t  hdr[LOG_HEADER_SIZE];
+    uint8_t  magicOk;
+    uint8_t  haveRecord;
+    uint16_t newestSeq = 0U;
 
     s_ready        = 0U;
     s_pendingCount = 0U;
+    s_flushProgress = 0U;
+    s_flushRequest = 0U;
+    s_flushing     = 0U;
+    s_flushFailed  = 0U;
     s_flushTimerMs = 0U;
 
     if (EEPROM_IsPresent() == 0U)
@@ -285,6 +441,7 @@ uint8_t Log_Init(void)
     s_hdr.seqNext     = 0U;
     s_droppedEvents   = 0U;
     s_hdr.bootId      = 0U;
+    s_hdr.generation  = LOG_GENERATION_INIT;
     s_hdr.totalEvents = 0U;
 
     if (EEPROM_Read(0U, hdr, LOG_HEADER_SIZE) != MYI2C_OK)
@@ -292,26 +449,38 @@ uint8_t Log_Init(void)
         return 2U;
     }
 
-    if ((hdr[HDR_OFF_MAGIC + 0U] != LOG_MAGIC_0) ||
-        (hdr[HDR_OFF_MAGIC + 1U] != LOG_MAGIC_1) ||
-        (hdr[HDR_OFF_MAGIC + 2U] != LOG_MAGIC_2) ||
-        (hdr[HDR_OFF_MAGIC + 3U] != LOG_MAGIC_3))
-    {
-        /* Blank or foreign device: start a fresh ring. */
-        s_hdr.delayMs = DOOR_AUTO_CLOSE_MS;
-        s_hdr.mode    = 0U;
-        s_hdr.bootId  = 0U;
-        s_hdr.seqNext = 0U;
+    magicOk = (uint8_t)((hdr[HDR_OFF_MAGIC + 0U] == LOG_MAGIC_0) &&
+                        (hdr[HDR_OFF_MAGIC + 1U] == LOG_MAGIC_1) &&
+                        (hdr[HDR_OFF_MAGIC + 2U] == LOG_MAGIC_2) &&
+                        (hdr[HDR_OFF_MAGIC + 3U] == LOG_MAGIC_3));
 
-        if (header_write() != MYI2C_OK)
+    /*
+     * A blank or foreign device, or one written by an older record layout, gets
+     * a fresh ring.
+     *
+     * The generation is chosen so that records already in the ring can never be
+     * mistaken for new ones:
+     *
+     *   - blank device    -> generation 1. There is nothing in the ring, and a
+     *                        version-1 record carries generation 0, so it cannot
+     *                        collide either.
+     *   - version bump    -> the old generation + 1, NOT 1. Resetting to 1 would
+     *                        make records stamped with generation 1 by an earlier
+     *                        firmware visible again the moment a future version
+     *                        is flashed, which is exactly the resurrection bug
+     *                        Log_Clear() was fixed to avoid - just triggered by
+     *                        an upgrade instead of a command.
+     */
+    if ((magicOk == 0U) || (get16(&hdr[HDR_OFF_VERSION]) != LOG_VERSION))
+    {
+        uint16_t startGen = (magicOk != 0U)
+                          ? (uint16_t)(get16(&hdr[HDR_OFF_GENERATION]) + 1U)
+                          : LOG_GENERATION_INIT;
+
+        if (initialise_fresh(startGen) != 0U)
         {
             return 3U;
         }
-
-        s_hdr.bootId = 1U;
-        (void)header_write();
-
-        s_ready = 1U;
         return 0U;
     }
 
@@ -319,6 +488,7 @@ uint8_t Log_Init(void)
     s_hdr.mode        = hdr[HDR_OFF_MODE];
     s_hdr.seqNext     = get16(&hdr[HDR_OFF_SEQ_NEXT]);
     s_hdr.bootId      = get16(&hdr[HDR_OFF_BOOT_ID]);
+    s_hdr.generation  = get16(&hdr[HDR_OFF_GENERATION]);
     s_hdr.totalEvents = (((uint64_t)get32(&hdr[HDR_OFF_TOTAL_HI])) << 32) |
                         (uint64_t)get32(&hdr[HDR_OFF_TOTAL_LO]);
 
@@ -332,13 +502,37 @@ uint8_t Log_Init(void)
     {
         s_hdr.mode = 0U;
     }
+    /* Generation 0 is never written by design, so reading it back means the
+       field is corrupt. Flooring it keeps the impossible value from being
+       persisted again on the header write below. */
+    if (s_hdr.generation == 0U)
+    {
+        s_hdr.generation = LOG_GENERATION_INIT;
+    }
 
-    rebuild_from_records();
+    haveRecord = rebuild_from_records(&newestSeq);
+
+    /*
+     * Do not simply carry the header's seqNext forward. A flush writes the
+     * records first and the header last, so a power cut in between (or a failed
+     * header page) leaves records on the EEPROM that the header knows nothing
+     * about - including their sequence numbers. Restarting from the stale header
+     * value would reissue sequence numbers that are already in the ring, and the
+     * recovery scan identifies the newest record by comparing sequence numbers,
+     * so duplicates make the ring order ambiguous. Take whichever is newer.
+     */
+    if ((haveRecord != 0U) &&
+        ((int16_t)((uint16_t)(newestSeq + 1U) - s_hdr.seqNext) > 0))
+    {
+        s_hdr.seqNext = (uint16_t)(newestSeq + 1U);
+    }
 
     s_hdr.bootId++;
     s_seqCounter = s_hdr.seqNext;
 
-    /* Persist the incremented boot counter and the recovered ring position. */
+    /* Persist the incremented boot counter, the recovered ring position, the
+       loaded lifetime counter (which rebuild_from_records() leaves alone) and
+       the corrected sequence number. */
     (void)header_write();
 
     s_ready = 1U;
@@ -355,24 +549,53 @@ uint8_t Log_Init(void)
   *         header still describes the previous state and the recovery scan finds
   *         the records that did land. Writing the header first would advertise
   *         records that were never stored.
+  * @note   MAIN LOOP ONLY. Every call performs tens of milliseconds of blocking
+  *         I2C, and the bus is shared with the display and (potentially) with a
+  *         transaction the caller is already in the middle of. Interrupt context
+  *         must go through Log_RequestFlush()/Log_Process() instead. s_flushing
+  *         is a guard, not a licence: it turns a programming error into a no-op
+  *         rather than into bus corruption.
+  * @return 0 when everything pending reached the EEPROM, non-zero otherwise.
   */
-void Log_Flush(void)
+uint8_t Log_Flush(void)
 {
     uint8_t i;
+    uint8_t rc;
 
-    if ((s_ready == 0U) || (s_pendingCount == 0U))
+    if (s_ready == 0U)
     {
-        return;
+        s_flushFailed = 1U;
+        return 1U;
+    }
+    if (s_pendingCount == 0U)
+    {
+        s_flushProgress = 0U;
+        s_flushTimerMs  = 0U;
+        s_flushFailed   = 0U;
+        return 0U;
+    }
+    if (s_flushing != 0U)
+    {
+        return 1U;      /* already inside a flush; see the note above */
     }
 
-    for (i = 0U; i < s_pendingCount; i++)
+    s_flushing = 1U;
+
+    /* Resume after the entries that already landed. Starting at 0 would rewrite
+       them into fresh slots - duplicate records in the ring, and a lifetime
+       counter inflated by the retry. */
+    for (i = s_flushProgress; i < s_pendingCount; i++)
     {
         if (record_write(s_hdr.wrIndex, &s_pending[i]) != MYI2C_OK)
         {
             /* EEPROM unreachable: keep the entries queued rather than losing
-               them silently, and let the next flush retry. */
-            return;
+               them silently, and let the next flush resume from here. */
+            s_flushing    = 0U;
+            s_flushFailed = 1U;
+            return 1U;
         }
+
+        s_flushProgress = (uint8_t)(i + 1U);
 
         s_hdr.wrIndex = (uint16_t)((s_hdr.wrIndex + 1U) % LOG_SLOT_COUNT);
 
@@ -387,23 +610,98 @@ void Log_Flush(void)
         s_hdr.totalEvents++;
     }
 
-    (void)header_write();
+    rc = header_write();
 
-    s_pendingCount = 0U;
+    if (rc == MYI2C_OK)
+    {
+        s_pendingCount  = 0U;
+        s_flushProgress = 0U;
+        s_flushTimerMs  = 0U;
+    }
+    else if (s_flushProgress != 0U)
+    {
+        /*
+         * The records themselves are stored; only the header write failed. They
+         * must not be re-written (that would duplicate records to fix a header
+         * that the next boot's scan does not need), so the committed prefix is
+         * dropped from the queue instead - the RAM ring state already includes it
+         * and the next successful header write publishes that.
+         *
+         * Dropping it is not just an optimisation: leaving it would pin a full
+         * queue forever if the header page kept failing, and Log_Add() would then
+         * drop every new event. A single un-writable page must not be able to
+         * switch event collection off.
+         */
+        uint8_t remaining = (uint8_t)(s_pendingCount - s_flushProgress);
+
+        memmove(&s_pending[0], &s_pending[s_flushProgress],
+                (size_t)remaining * sizeof(LogEntry_t));
+
+        s_pendingCount  = remaining;
+        s_flushProgress = 0U;
+    }
+    else
+    {
+        /* Nothing reached the EEPROM at all; the whole batch stays queued. */
+    }
+
+    s_flushing    = 0U;
+    s_flushFailed = (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
+    return (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
+}
+
+/**
+  * @brief  Ask for a flush to happen in the main loop.
+  * @note   Safe from any context, including an interrupt: it only sets a flag.
+  */
+void Log_RequestFlush(void)
+{
+    s_flushRequest = 1U;
     s_flushTimerMs = 0U;
 }
 
-void Log_Tick1ms(void)
+/**
+  * @brief  Perform a requested flush. Call once per main-loop iteration.
+  */
+void Log_Process(void)
 {
-    if ((s_ready == 0U) || (s_pendingCount == 0U))
+    if (s_flushRequest == 0U)
     {
         return;
     }
 
-    /* Flush sooner when the batch is full, otherwise on the interval. */
-    if (s_pendingCount >= LOG_FLUSH_BATCH)
+    /* Cleared before the attempt, not after: a failed flush must not be retried
+       on every iteration. Hammering an unreachable EEPROM at loop speed would
+       spend the whole CPU inside I2C timeouts. The 1 ms tick re-requests it once
+       the interval elapses, which bounds the retry rate. */
+    s_flushRequest = 0U;
+
+    (void)Log_Flush();
+}
+
+void Log_Tick1ms(void)
+{
+    if (s_ready == 0U)
     {
-        Log_Flush();
+        return;
+    }
+
+    if (s_pendingCount == 0U)
+    {
+        s_flushTimerMs = 0U;
+        return;
+    }
+
+    /*
+     * Request sooner when the batch is full, otherwise on the interval - but
+     * only use the fast path when the previous attempt actually worked. After a
+     * failure the timer below paces the retries, so an EEPROM that stops
+     * answering cannot turn every main-loop iteration into a 20 ms timeout.
+     * Nothing is written here either way: see the note on Log_Flush().
+     */
+    if ((s_pendingCount >= LOG_FLUSH_BATCH) && (s_flushFailed == 0U))
+    {
+        Log_RequestFlush();
         return;
     }
 
@@ -411,7 +709,7 @@ void Log_Tick1ms(void)
 
     if (s_flushTimerMs >= LOG_FLUSH_INTERVAL_MS)
     {
-        Log_Flush();
+        Log_RequestFlush();
     }
 }
 
@@ -428,23 +726,28 @@ void Log_Add(LogEvent_t event, uint8_t doorState, uint8_t mode, uint16_t duratio
         return;
     }
 
-    /* If a burst overruns the batch, flush synchronously rather than dropping
-       the event: correctness of the record beats one flush delay. */
-    if (s_pendingCount >= LOG_FLUSH_BATCH)
+    /*
+     * If a burst overruns the batch, ask for a flush rather than performing one
+     * here. This function is documented as never blocking and never touching the
+     * EEPROM, and until now it did not honour that: it called Log_Flush(), which
+     * is tens of milliseconds of I2C. Log_Process() runs on the same main-loop
+     * iteration, so the request is served immediately and the drop path below
+     * stays effectively unreachable.
+     */
+    if ((s_pendingCount >= LOG_FLUSH_BATCH) && (s_flushFailed == 0U))
     {
-        Log_Flush();
+        Log_RequestFlush();
     }
 
     /*
-     * The flush above can FAIL - the EEPROM is unreachable, or its internal
-     * write cycle is still running - and on failure Log_Flush() deliberately
-     * leaves s_pendingCount untouched so the entries are not lost. That means
-     * this function can still arrive here with the queue full, and writing to
-     * s_pending[LOG_FLUSH_BATCH] would run one past the end of the array and
-     * corrupt whatever follows it in .bss.
+     * The queue can still be full here, because a flush is now asynchronous and
+     * may also have failed earlier (EEPROM unreachable, or its internal write
+     * cycle still running - Log_Flush() deliberately keeps the entries queued so
+     * they are not lost). Writing to s_pending[LOG_FLUSH_BATCH] would run one
+     * past the end of the array and corrupt whatever follows it in .bss.
      *
-     * So the boundary is re-checked AFTER the flush. An event that cannot be
-     * queued is dropped and counted; losing a log line is bad, corrupting the
+     * So the boundary is checked BEFORE the write, always. An event that cannot
+     * be queued is dropped and counted; losing a log line is bad, corrupting the
      * door state is worse.
      */
     if (s_pendingCount >= LOG_FLUSH_BATCH)
@@ -489,9 +792,16 @@ uint16_t Log_Count(void)
 
 uint64_t Log_TotalEvents(void)
 {
-    /* Persisted count plus whatever is still queued in RAM, so the answer is
-       correct before a flush as well as after one. */
-    return s_hdr.totalEvents + (uint64_t)s_pendingCount;
+    /*
+     * Persisted count plus whatever is queued but not yet written, so the answer
+     * is correct before a flush as well as after one. The subtraction matters
+     * after a *partially* failed flush: the entries up to s_flushProgress are
+     * already counted in totalEvents, and counting the whole queue would report
+     * them twice until the retry completes.
+     */
+    uint8_t uncommitted = (uint8_t)(s_pendingCount - s_flushProgress);
+
+    return s_hdr.totalEvents + (uint64_t)uncommitted;
 }
 
 uint8_t Log_Get(uint16_t index, LogEntry_t *out)
@@ -512,88 +822,111 @@ uint8_t Log_Get(uint16_t index, LogEntry_t *out)
 }
 
 /**
-  * @brief  Invalidate one record slot so the recovery scan will ignore it.
-  * @note   The whole slot is filled with 0xFF, which is exactly what erased
-  *         EEPROM reads back as and what rebuild_from_records() skips. Every
-  *         byte is set explicitly: a partial initialiser such as
-  *         `= { 0xFFU }` would zero the remaining bytes, and a record whose
-  *         event byte happens to land on 0xFF but whose other bytes are zero
-  *         would still be skipped - but the intent would be unclear and any
-  *         change to the empty test would silently break it.
+  * @brief  Physically blank every record slot.
+  * @note   Only used when the generation counter wraps, which takes 65535 clear
+  *         commands. The whole slot is filled with 0xFF, which is exactly what
+  *         erased EEPROM reads back as and what rebuild_from_records() skips.
+  *         Every byte is set explicitly: a partial initialiser such as
+  *         `= { 0xFFU }` would zero the remaining bytes, and a record whose event
+  *         byte happens to land on 0xFF but whose other bytes are zero would
+  *         still be skipped - but the intent would be unclear and any change to
+  *         the empty test would silently break it.
+  * @return 0 on success, non-zero at the first slot that could not be written.
   */
-static uint8_t slot_erase(uint16_t slot, uint8_t eepromPresent, uint16_t *erased)
+static uint8_t erase_all_slots(void)
 {
     uint8_t blank[LOG_ENTRY_SIZE];
     uint8_t k;
-
-    if (eepromPresent == 0U)
-    {
-        /* No memory to clear; count the slot as handled so the caller does not
-           treat this as a failure. */
-        (*erased)++;
-        return MYI2C_OK;
-    }
+    uint16_t i;
 
     for (k = 0U; k < LOG_ENTRY_SIZE; k++)
     {
         blank[k] = 0xFFU;
     }
 
-    if (EEPROM_Write(slot_address(slot), blank, LOG_ENTRY_SIZE) != MYI2C_OK)
+    for (i = 0U; i < LOG_SLOT_COUNT; i++)
     {
-        return MYI2C_ERR_TIMEOUT;
+        if (EEPROM_Write(slot_address(i), blank, LOG_ENTRY_SIZE) != MYI2C_OK)
+        {
+            return 1U;
+        }
     }
 
-    (*erased)++;
-    return MYI2C_OK;
+    return 0U;
 }
 
 uint8_t Log_Clear(void)
 {
-    uint16_t i;
-    uint16_t erased = 0U;
-    uint8_t  eepromPresent;
-
     if (s_ready == 0U)
     {
         return 1U;
     }
 
-    eepromPresent = EEPROM_IsPresent();
-
     /*
-     * Clearing the header alone is NOT enough, and that was a real bug: the
-     * record area still holds valid-looking entries, and Log_Init() rebuilds the
-     * ring by scanning all LOG_SLOT_COUNT slots on every boot. So a cleared log
-     * would come back after the next power cycle.
+     * Clearing the header alone is NOT enough - the record area still holds
+     * valid-looking entries and Log_Init() rebuilds the ring by scanning all
+     * LOG_SLOT_COUNT slots on every boot, so a cleared log came back after the
+     * next power cycle.
      *
-     * The records are therefore invalidated by writing them blank (0xFF, which
-     * rebuild_from_records() skips). That is up to 252 page-writes - slow, but
-     * this is a user-initiated command and it runs in the main loop, never on the
-     * limit-switch path, so blocking here cannot delay a safety response.
+     * The first fix rewrote all 252 slots blank. That worked, but it was the
+     * wrong trade twice over:
      *
-     * It is also the only approach that survives leaving no residue: no validity
-     * marker is needed in the header, so an interrupted clear cannot leave a
-     * record that the scan would still accept.
+     *   - It blocked the main loop for over a second (252 writes, each waiting
+     *     out a ~5 ms internal cycle). Door_Update() does not run during that
+     *     time, which includes the level-triggered reversal safety net - so a
+     *     person stepping into the doorway while the door was closing would not
+     *     be seen. The old comment claimed this "cannot delay a safety response"
+     *     because it is not on the limit-switch path; that reasoning was wrong,
+     *     because the limit ISR is not the only safety layer.
+     *   - It spent 252 EEPROM write cycles per clear on the same page.
+     *
+     * Now a record only counts when its generation stamp matches the header's, so
+     * invalidating every record is a single 32-byte page write - the header page,
+     * written atomically. A power cut during the clear leaves the old generation,
+     * so the result is either "cleared" or "not cleared", never a half-erased
+     * ring.
      */
-    if (eepromPresent != 0U)
+    s_hdr.generation++;
+
+    if (s_hdr.generation == 0U)
     {
-        for (i = 0U; i < LOG_SLOT_COUNT; i++)
+        /*
+         * 65535 clears have happened and the counter would repeat, which would
+         * resurrect records that old. Blank the record area once and restart the
+         * counter. This is the only path that still pays the full erase, and it
+         * is rare enough to be worth the pause; the pause itself is unavoidable,
+         * because there is no way to invalidate 252 records that already carry
+         * the generation we are about to reuse.
+         */
+        if (erase_all_slots() != 0U)
         {
-            if (slot_erase(i, eepromPresent, &erased) != MYI2C_OK)
-            {
-                /* Stop at the first failure and leave the header untouched, so
-                   the ring description still matches what is actually stored. */
-                return 2U;
-            }
+            /* The generation has NOT been written yet, so the header still
+               describes the old, intact ring. Leave it alone and report the
+               failure: nothing has changed. */
+            s_hdr.generation = 0xFFFFU;
+            return 2U;
         }
+
+        s_hdr.generation = LOG_GENERATION_INIT;
     }
 
-    s_pendingCount = 0U;
-    s_hdr.count    = 0U;
-    s_hdr.wrIndex  = 0U;
+    /* Anything still queued belongs to the log being erased. */
+    s_pendingCount  = 0U;
+    s_flushProgress = 0U;
+    s_flushRequest  = 0U;
 
-    return header_write();
+    s_hdr.count   = 0U;
+    s_hdr.wrIndex = 0U;
+
+    {
+        uint8_t rc = header_write();
+
+        /* Keep the retry-pacing flag honest: a successful clear proves the bus
+           works, a failed one is exactly the condition the backoff exists for. */
+        s_flushFailed = (uint8_t)((rc == MYI2C_OK) ? 0U : 1U);
+
+        return rc;
+    }
 }
 
 /*===========================================================================*/

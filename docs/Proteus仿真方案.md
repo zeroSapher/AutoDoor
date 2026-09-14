@@ -156,6 +156,13 @@ Door          : IDLE (press KEY1 to enable)
 
 > 仿真**不能**验证 `EEPROM: OK` 与 `records=N` 持久化，那需要真机。
 
+> **一个副作用要提前说明**（round 10 起）：没有 EEPROM 时 `LOG?` / `LOG?ALL` / `LOG?<n>`
+> 会回 `ERR EEPROM (log not fully persisted)`，而不是以前那句 `OK LOG EMPTY`。
+> 这是**故意的**：日志不可用时回"空"是在撒谎 —— 它根本无从知道有没有记录。
+> （`LOG?CLEAR` 本来就回 `ERR EEPROM`，没有变化。）
+> 仿真里请把这些 `ERR EEPROM` 当作**预期输出**，它和 `Log: UNAVAILABLE`
+> 一起证明降级路径是自洽的。
+
 ### 4.2 测试二：按键与模式
 
 | 操作 | 预期 |
