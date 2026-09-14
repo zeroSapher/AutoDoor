@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    OLED.h
-  * @brief   SSD1306 128x64 OLED over the project's shared software I2C bus.
+  * @brief   OLED12864 / SSD1306-compatible 128x64 OLED over shared I2C.
   *
   * Public API of the JiangXie Technology (jiangxiekeji.com) open-source SSD1306
   * driver, V2.0, 2024.10.20, with the hardware layer re-targeted onto MyI2C.

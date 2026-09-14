@@ -4,19 +4,17 @@
 
 .DESCRIPTION
     Compiles the SAME application, door state machine and command protocol as the
-    real firmware, but swaps the display backend from the SSD1306 OLED to an
-    HD44780 1602 character LCD, because Proteus has no SSD1306 model.
+    real firmware, using the OLED12864 I2C display model.
 
     What changes versus tools/build.ps1:
-      - Display backend: Display_Oled.c + OLED driver  ->  Display_Lcd.c + LCD1602
-      - I2C devices (OLED, AT24C32) are not compiled in; the real firmware already
-        degrades gracefully when they are absent, so this only saves space and
-        avoids pulling in a driver for a chip the simulation does not have.
+            - Display backend: Display_Oled.c + SSD1306-compatible OLED driver
+            - EEPROM uses EEPROM_Stub.c because persistence is not part of the display
+                simulation; the application must report that storage is unavailable.
       - Defines AUTODOOR_SIM_BUILD so the firmware can report which variant it is.
       - Output goes to build-sim/ so the two builds never overwrite each other.
 
-    IMPORTANT: the simulation build cannot exercise the hardware limit inputs or
-    the I2C bus, because the 1602 needs the six pins those use. See
+    IMPORTANT: the simulation build can exercise the OLED I2C display and GPIO
+    inputs, but not EEPROM persistence or the real NC motor power-cut circuit. See
     docs/Proteus仿真方案.md for what the simulation does and does not validate.
 
 .PARAMETER DebugBuild
@@ -87,7 +85,7 @@ $CFlags = $McFlags + $Defines + $IncFlags + @(
     '-ffunction-sections', '-fdata-sections', '-std=gnu11'
 )
 
-Write-Host 'AutoDoor SIMULATION build (LCD1602 display backend)' -ForegroundColor Cyan
+Write-Host 'AutoDoor SIMULATION build (OLED12864 I2C display backend)' -ForegroundColor Cyan
 Write-Host "Toolchain : $Gcc" -ForegroundColor Cyan
 Write-Host "Version   : $((& $Gcc --version | Select-Object -First 1))" -ForegroundColor Cyan
 

@@ -16,8 +16,8 @@
 | 软件 PWM 波形与斜坡 | ✅ 能 | 虚拟示波器看 PA4/PA5 |
 | 限位逻辑（低电平/高电平判定、双限位冲突） | ✅ 能 | 用拨码开关给电平即可 |
 | 按键消抖与长短按 | ✅ 能 | 按键元件 |
-| **OLED 显示** | ❌ **不能** | Proteus **无 SSD1306 模型** → 仿真固件改用 **1602 字符屏** |
-| **EEPROM 持久化** | ❌ **不能** | 1602 占了 I2C 引脚，仿真固件用 **EEPROM stub**，日志走降级路径 |
+| **OLED 显示** | ✅ **能** | 使用 Proteus 的 **OLED12864 I2C**（SSD1306-compatible）模型 |
+| **EEPROM 持久化** | ❌ **不能** | 仿真固件使用 **EEPROM stub**，日志走降级路径 |
 | **电机真实转速/扭矩** | ❌ 不能 | 模型理想化 |
 | **硬件限位断电回路** | ❌ 不能 | 那是模拟电路行为，需真机验证 |
 | **中断是否真的触发** | ⚠️ 不确定 | 见下方"EXTI 风险" |
@@ -49,7 +49,7 @@ Proteus 的 STM32 模型对 NVIC/EXTI 的支持历来看法不一，部分版本
 
 | | 真机 `build/AutoDoor.hex` | 仿真 `build-sim/AutoDoorSim.hex` |
 |---|---|---|
-| 显示后端 | `Display_Oled.c` + SSD1306 | `Display_Lcd.c` + HD44780 1602 |
+| 显示后端 | `Display_Oled.c` + SSD1306 | `Display_Oled.c` + OLED12864 I2C |
 | 存储后端 | `EEPROM.c` + AT24C32 | `EEPROM_Stub.c`（报告器件缺失） |
 | Flash 占用 | 22692 B (34.6%) | 19020 B (29.0%) |
 
@@ -69,28 +69,26 @@ Proteus 的 STM32 模型对 NVIC/EXTI 的支持历来看法不一，部分版本
 | BOOT0 | 经 10 kΩ 下拉到 GND |
 | 电源 | VDD/VDDA 接 +3.3V，VSS/VSSA 接 GND，每个 VDD 配 100 nF |
 
-### 3.2 1602 显示
+### 3.2 OLED12864 I2C 显示
 
-| 1602 引脚 | 接 MCU |
+| OLED12864 引脚 | 接 MCU |
 |---|---|
-| D4 / D5 / D6 / D7 | **PA6 / PA7 / PA8 / PA15** |
-| RS | **PA2** |
-| EN | **PA3** |
-| RW | **接 GND**（只用写模式） |
-| VSS / VDD | GND / +5V |
-| V0（对比度） | 10 kΩ 电位器中点，两端接 +5V 与 GND |
-| A / K（背光） | +5V 经 220 Ω / GND |
+| SCL | **PB10** |
+| SDA | **PB11** |
+| VCC | **+3.3 V** |
+| GND | **GND** |
 
-> **这 6 个是"两套构建都空着"的端口 A 引脚，不是随便选的。**
+**还要加两个上拉电阻**：`PB10` 和 `PB11` 各经一个 **4.7 kΩ（或 10 kΩ）到 +3.3 V**。
+
+> ⚠️ **这一步漏掉的话，开机第一行就会是 `I2C idle : NO (bus held low)`，`Display : not found`。**
 >
-> 1602 以前占 **PB10–PB15**，其中 PB12/PB13 现在已经是**门内外传感器**的引脚 ——
-> 它们是最合适的空闲 EXTI 编号（见 `Core/main.h` 的引脚选择说明）。
-> 1602 只存在于仿真里、**没有任何物理约束**，所以让路的应该是它，而不是真机上的输入。
->
-> 附带好处：仿真不再碰 PB10/PB11，两套构建的引脚含义**完全一致**，
-> `tools/gen-hardware.py` 里那条"I2C/LCD 重叠"特例也随之删掉了。
-> 代价只是仿真里 PB10/PB11 悬空 —— `I2C idle: NO (bus held low)` 仍会照常出现
-> （没有上拉、没有器件），这条预期输出没变，只是原因变了。
+> I2C 是开漏总线，**没有上拉就没有高电平**。固件的 `MyI2C_IsIdle()` 一上电就检查两条线
+> 是否都被释放到高；靠 10 kΩ 上拉（见 §3.3）读不到"H"时，它会如实报告总线被拉死 ——
+> 那是**正确的诊断**，不是 bug。真机上 OLED 模块通常自带这两个电阻，所以这一点只在
+> 仿真里容易漏。
+
+> 仿真使用 OLED12864 的 I2C 接口，因此 PB10/PB11 与真机保持一致；
+> EEPROM 仍由 `EEPROM_Stub.c` 替代，仿真**不会**验证持久化（见 §4.1）。
 
 ### 3.3 输入（按键 / 拨码开关）
 
@@ -148,8 +146,8 @@ Proteus 的 STM32 模型对 NVIC/EXTI 的支持历来看法不一，部分版本
 ========================================
  AutoDoor  STM32F103C8T6  v1.0
 ========================================
-I2C idle      : NO (bus held low)      ← 预期：仿真无 I2C 器件，总线状态无意义
-Display       : OK
+I2C idle      : yes                    ← 预期：OLED12864 I2C 总线空闲
+Display       : OK                     ← 预期：OLED12864 应答
 EEPROM @0xA0  : FAILED at 0x0000       ← 预期：stub 报告器件缺失
 Log           : UNAVAILABLE - running with defaults
 Limits        : open=0 closed=1
@@ -159,7 +157,7 @@ Door          : IDLE (press KEY1 to enable)
 **判定**：
 - ✅ `Log: UNAVAILABLE` 出现 → **降级路径正确**（这是仿真特意验证的行为）
 - ✅ `Door: IDLE` → 上电时读到关门限位闭合，位置判断正确
-- 1602 第一行显示 `AutoDoor`，第二行显示状态
+- OLED12864 第一行显示 `AutoDoor`，其余区域显示状态和事件
 
 > 仿真**不能**验证 `EEPROM: OK` 与 `records=N` 持久化，那需要真机。
 
@@ -174,7 +172,7 @@ Door          : IDLE (press KEY1 to enable)
 
 | 操作 | 预期 |
 |---|---|
-| 按 KEY1 | 串口出现 `SYSTEM_START`，状态从 `STOPPED`/`IDLE` 变化；1602 第二行状态变化 |
+| 按 KEY1 | 串口出现 `SYSTEM_START`，状态从 `STOPPED`/`IDLE` 变化；OLED 状态变化 |
 | 按 KEY2 | `MODE_CHANGE`，模式在 AUTO/MANUAL 间切换 |
 | 按 KEY1 再按 | `SYSTEM_STOP` |
 
@@ -204,7 +202,7 @@ Door          : IDLE (press KEY1 to enable)
 | 步骤 | 操作 | 预期串口 |
 |---|---|---|
 | 1 | KEY1 使能 | `SYSTEM_START` |
-| 2 | 按"门外"键 | `ENTER_IN` → `OPEN_START` → 1602 显示 `OPENING` |
+| 2 | 按"门外"键 | `ENTER_IN` → `OPEN_START` → OLED 显示 `OPENING` |
 | 3 | 拨动**开门限位**开关 | `LIMIT open edge` → `OPEN_DONE DUR=xxxxms` → `OPEN` |
 | 4 | 等待 5 s 不操作 | `CLOSE_START` → `CLOSING`，蜂鸣器响 |
 | 5 | 拨动**关门限位**开关 | `CLOSE_DONE` → `IDLE` |
@@ -229,13 +227,12 @@ Door          : IDLE (press KEY1 to enable)
 
 | 现象 | 原因与处理 |
 |---|---|
-| 1602 只显示一排方块 | **对比度 V0 没调**，调电位器 |
-| 1602 全黑/全亮无字符 | 初始化时序问题；确认 RW 接了 GND，EN 接 PA3 |
-| 1602 第一行显示但第二行空 | 检查 D4–D7 是否接成 PA6/PA7/PA8/PA15（不是别的引脚） |
+| OLED 只显示空白 | 检查 OLED12864 的 VCC/GND、PB10/PB11、地址和 I2C 上拉 |
+| OLED 无显示 | 确认使用 SSD1306-compatible OLED12864 I2C 模型，地址为 `0x78` |
 | 门外/门内按键无反应 | 确认接的是 **PB12/PB13**（不是 PB0/PB1——那是旧引脚） |
 | 串口无输出 | 检查 PA9→RXD 是否**交叉**，波特率是否 115200 |
 | 按键无反应 | 若 EXTI 在你的 Proteus 版本上不触发，**等 20–25 ms** —— 固件靠 1 ms 采样兜底，应当仍能识别 |
-| 限位拨动无反应 | 确认上拉/下拉方向：**仿真中"按下 = 高"** 才是"到限位" |
+| 限位拨动无反应 | 确认上拉/下拉方向：**"按下 = 低"** 才是"到限位"（见 §3.3）。写成"按下 = 高"就永远不会识别 |
 | 电机不转 | 仿真里正常，看 PWM 波形即可 |
 | 时钟不对导致延时错乱 | 在 STM32 模型属性中确认 **Crystal Frequency = 8 MHz** |
 

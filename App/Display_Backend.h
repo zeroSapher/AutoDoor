@@ -8,12 +8,8 @@
   * separate from Display.h means application code cannot accidentally depend on
   * primitives that only one panel happens to offer.
   *
-  * Two backends exist:
-  *   Display_Oled.c   SSD1306 128x64 bitmap  - the real board
-  *   Display_Lcd.c    HD44780 1602 character - the Proteus simulation
-  *
-  * Only one is compiled, selected by AUTODOOR_SIM_BUILD. See
-  * docs/Proteus仿真方案.md.
+  * The SSD1306-compatible OLED backend is used by both real and simulation
+  * builds. The simulation changes storage only, not the display contract.
   ******************************************************************************
   */
 

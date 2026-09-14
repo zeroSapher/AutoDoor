@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    OLED.c
-  * @brief   SSD1306 128x64 OLED driver over the project's shared software I2C.
+	* @brief   OLED12864 / SSD1306-compatible 128x64 OLED over shared I2C.
   *
   * PORTING NOTE
   * ------------

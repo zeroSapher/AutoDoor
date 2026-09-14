@@ -394,6 +394,6 @@ python tools\gen-hardware.py
 |---|---|---|
 | PC13 的 `LED_*` 宏 | **遗留未使用**（原心跳功能已在重写 main.c 时移除） | 无影响；但**不要**把状态 LED 接到 PC13 |
 | `Sensor` 为按键模拟 | 原理图用按键 | 真实红外（E18-D80NK）接线相同：OC 输出 + 上拉 |
-| OLED 型号 | 真机 SSD1306 | Proteus 仿真需换 1602（见设计文档 9.2 节） |
+| OLED 型号 | 真机和 Proteus 均使用 OLED12864 I2C（SSD1306-compatible） | 共用 PB10/PB11 软件 I2C |
 | 蓝牙 USART2 | 未接 | PA2/PA3 预留 |
 | RTC | 无 | 时间为开机相对值，由 PC 换算 |

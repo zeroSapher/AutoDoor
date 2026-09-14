@@ -5,11 +5,9 @@
   *
   * WHY AN ABSTRACTION LAYER
   * ------------------------
-  * The real board has an SSD1306 OLED over I2C. The Proteus simulation has no
-  * OLED model, so the simulation build uses a 1602 character LCD instead (see
-  * docs/设计文档.md section 9.2). Those two devices share nothing at the driver
-  * level - one is a 128x64 bitmap over I2C, the other a 16x2 character device on
-  * a parallel bus.
+  * Both the real board and the Proteus simulation use a 128x64 SSD1306-compatible
+  * OLED over I2C. The simulation swaps only the EEPROM implementation, so the
+  * display path remains identical in both builds.
   *
   * If the door logic called OLED_* directly, swapping or simulating the display
   * would mean editing every call site. Instead everything above goes through the
@@ -17,9 +15,7 @@
   * draw it. Door.c, Log.c and Cmd.c never include an OLED header.
   *
   * The vocabulary is deliberately small and semantic (a status view, an event
-  * view, a log view) rather than a generic canvas. That keeps a character-only
-  * implementation feasible: it can degrade the content instead of having to
-  * emulate a bitmap.
+  * view, a log view) rather than a generic canvas.
   ******************************************************************************
   */
 

@@ -26,12 +26,8 @@ WHAT IT CHECKS
      in full, because a missing one means a missing connector.
 
 Build variants (REAL / SIM / BOTH) let one pin carry different nets in the two
-builds. That mechanism used to be needed for a real overlap: the simulation's
-1602 LCD sat on PB10/PB11, the I2C pins. The 1602 has since moved to port A pins
-that are free in both builds, so no overlap remains - but the variant machinery
-stays, and any REAL-only net sharing a pin with a SIM-only net is still reported
-as intentional rather than as a collision. Bringing one back is a decision, not
-an accident, and the report says so.
+builds. The current simulation uses the same OLED I2C pins as the real board, so
+the display bus is a BOTH net; only EEPROM storage is replaced by a stub.
 
 Usage:
     python tools/gen-hardware.py            # check, and write the artifacts
@@ -62,7 +58,7 @@ OUT_DIR = os.path.join(ROOT, "generated")
 # Build variants
 # ---------------------------------------------------------------------------
 # REAL : the physical board
-# SIM  : the Proteus simulation, where a 1602 LCD replaces the OLED
+# SIM  : the Proteus simulation, using the OLED12864 I2C display model
 REAL = "real"
 SIM = "sim"
 BOTH = "both"
@@ -72,24 +68,15 @@ BOTH = "both"
 # MCU pin macros -> net
 # ---------------------------------------------------------------------------
 # Every entry maps a firmware macro stem to the net it belongs to. `variants`
-# says which builds the connection exists in; a pin may appear twice ONLY if the
-# variants do not overlap. No entry currently needs that - the simulation's 1602
-# was moved onto pins that are free in both builds precisely so it would not have
-# to claim the I2C lines - but the variant column still marks which nets are
-# simulation-only, which is what the pinout CSV reports.
+# says which builds the connection exists in. The OLED I2C bus is present in
+# both builds; only the EEPROM storage backend changes in simulation.
 NET_TABLE = [
     # stem                net name          role                  variants
     ("STATUS_LED",        "LED_STATUS",     "Status LED (state blink)", BOTH),
     ("UART_TX",           "USART1_TX",      "Console TX",         BOTH),
     ("UART_RX",           "USART1_RX",      "Console RX",         BOTH),
-    ("MYI2C_SCL",         "I2C_SCL",        "I2C clock",          REAL),
-    ("MYI2C_SDA",         "I2C_SDA",        "I2C data",           REAL),
-    ("LCD1602_RS",        "LCD_RS",         "1602 register select", SIM),
-    ("LCD1602_EN",        "LCD_EN",         "1602 enable",        SIM),
-    ("LCD1602_D4",        "LCD_D4",         "1602 data bit 4",    SIM),
-    ("LCD1602_D5",        "LCD_D5",         "1602 data bit 5",    SIM),
-    ("LCD1602_D6",        "LCD_D6",         "1602 data bit 6",    SIM),
-    ("LCD1602_D7",        "LCD_D7",         "1602 data bit 7",    SIM),
+    ("MYI2C_SCL",        "I2C_SCL",        "OLED/EEPROM I2C clock", BOTH),
+    ("MYI2C_SDA",        "I2C_SDA",        "OLED/EEPROM I2C data",  BOTH),
     ("LIMIT_OPEN",        "LIMIT_OPEN",     "Open limit input",   BOTH),
     ("LIMIT_CLOSE",       "LIMIT_CLOSE",    "Close limit input",  BOTH),
     ("SENSOR_OUT",        "SENSOR_OUT",     "Outside presence",   BOTH),
@@ -213,7 +200,7 @@ def parse_main_h(path):
     than by assuming a fixed suffix pair:
 
         UART_GPIO_PORT  -> stem "UART_GPIO"   ... but the signal is UART_TX
-        LCD1602_PORT    -> shared by six signals  (LCD1602_RS, _EN, _D4.._D7)
+        MYI2C_PORT      -> shared by the OLED I2C signals (MYI2C_SCL/SDA)
         LIMIT_OPEN_PORT -> stem "LIMIT_OPEN"
 
     A pin macro's stem is progressively shortened until it matches a known port

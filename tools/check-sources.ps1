@@ -111,12 +111,18 @@ if (-not $Quiet) {
     Write-Host ""
 
     # Which files differ between the real and simulation builds, and why.
+    #
+    # The two builds now share the display path (both drive the SSD1306 OLED over
+    # I2C), so the only legitimate difference is storage. This label used to read
+    # "OLED + EEPROM driver", which described an older arrangement where the
+    # simulation used a 1602 LCD instead; a label that no longer matches the set
+    # it prints is worse than no label, because the reader stops checking.
     $realOnly = $psReal | Where-Object { $_ -notin $psSim }
     $simOnly  = $psSim  | Where-Object { $_ -notin $psReal }
     if ($realOnly -or $simOnly) {
-        Write-Host "Real-only (expected: OLED + EEPROM driver):" -ForegroundColor DarkGray
+        Write-Host "Real-only (expected: EEPROM driver only - the display path is shared):" -ForegroundColor DarkGray
         $realOnly | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
-        Write-Host "Sim-only (expected: 1602 + EEPROM stub):" -ForegroundColor DarkGray
+        Write-Host "Sim-only (expected: EEPROM stub only - the display path is shared):" -ForegroundColor DarkGray
         $simOnly | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
         Write-Host ""
     }

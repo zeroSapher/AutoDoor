@@ -44,10 +44,9 @@ $BaseSources = @(
     'App/Fmt.c'
 )
 
-# The display differs by build, and both panels must never be linked at once:
-# the OLED backend pulls in the bitmap driver and its font tables, the LCD
-# backend pulls in the HD44780 driver, and only one set of DispBk_* symbols may
-# exist. See App/Display_Backend.h.
+# The real and simulation builds use the same OLED backend. The simulation keeps
+# the EEPROM stub because the Proteus setup only models the display, not
+# persistent AT24C32 storage.
 $RealBackend = @(
     'Hardware/OLED/OLED.c'
     'Hardware/OLED/OLED_Data.c'
@@ -56,10 +55,38 @@ $RealBackend = @(
 )
 
 $SimBackend = @(
-    'Hardware/LCD1602/LCD1602.c'
+    'Hardware/OLED/OLED.c'
+    'Hardware/OLED/OLED_Data.c'
     'Hardware/EEPROM/EEPROM_Stub.c'
-    'App/Display_Lcd.c'
+    'App/Display_Oled.c'
 )
+
+# ---------------------------------------------------------------------------
+# Retained but NOT compiled: the HD44780 1602 backend
+# ---------------------------------------------------------------------------
+#   App/Display_Lcd.c
+#   Hardware/LCD1602/LCD1602.c
+#   Hardware/LCD1602/LCD1602.h
+#
+# The simulation used to drive a 1602 because Proteus was assumed to have no
+# OLED model; it now drives a 128x64 SSD1306-compatible OLED, so the 1602 backend
+# is in no manifest. It is kept deliberately rather than deleted, because the
+# Proteus OLED model has not been exercised yet and the 1602 is the more reliable
+# Proteus component - if the OLED model turns out to be unusable, this is the
+# fallback for the first execution-based verification this project has ever had.
+#
+# Naming them here is the point. A file that appears in no manifest is invisible
+# to tools/check-sources.ps1, which compares manifests; that is the same shape as
+# the orphaned-net check in tools/gen-hardware.py, which exists because "not
+# referenced any more" must be a decision someone wrote down, not an accident.
+#
+# To revive it: re-add the LCD1602_* pin block to Core/main.h (it is in git at
+# 02ea5c7), swap the two entries in $SimBackend below, restore the six nets in
+# tools/gen-hardware.py's NET_TABLE, and add 'Hardware/LCD1602' back to
+# $IncludeDirs.
+#
+# To delete it instead: `git rm App/Display_Lcd.c Hardware/LCD1602/` - nothing
+# else references it.
 
 $IncludeDirs = @(
     'Core'
@@ -68,7 +95,6 @@ $IncludeDirs = @(
     'Hardware/Delay'
     'Hardware/MyI2C'
     'Hardware/OLED'
-    'Hardware/LCD1602'
     'Hardware/EEPROM'
     'Hardware/UART'
     'Hardware/Motor'

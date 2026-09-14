@@ -108,46 +108,6 @@ extern "C" {
 #define OLED_I2C_ADDRESS        0x78U   /* 7-bit 0x3C shifted left */
 
 /*===========================================================================*/
-/*  HD44780 1602 character LCD - SIMULATION BUILD ONLY                       */
-/*===========================================================================*/
-/*
- * Proteus has no SSD1306 model, so the simulation build (AUTODOOR_SIM_BUILD)
- * drives a 1602 character LCD instead. App/Display.c selects its backend at
- * compile time and everything above it is unchanged, which is exactly what the
- * display abstraction in Display.h exists for.
- *
- * WIRING - THE SIMULATION MOVES, THE BOARD DOES NOT
- * -------------------------------------------------
- * A 4-bit HD44780 needs 6 pins, and the real board has none to spare. The 1602
- * used to claim PB10..PB15, which forced two awkward declarations: an I2C/LCD
- * overlap special case in tools/gen-hardware.py, and a note in the bring-up
- * documentation about pins that meant different things per build.
- *
- * That was the wrong side of the trade. The 1602 exists only inside a Proteus
- * simulation - it has no physical constraint at all - whereas PB12/PB13 are the
- * only free EXTI lines suitable for the presence sensors. So the simulation's
- * display is what moved, onto the six port A pins that are free in BOTH builds:
- *
- *     PA2, PA3, PA6, PA7, PA8, PA15
- *
- * The overlap special case is gone with it, and PB10/PB11 (I2C) and PB12/PB13
- * (sensors) now mean the same thing in both builds.
- *
- * Consequence: the simulation still cannot exercise the I2C bus or the EEPROM.
- * Those are real-hardware-only features; see docs/Proteus仿真方案.md.
- */
-#define LCD1602_RCC             RCC_APB2Periph_GPIOA
-#define LCD1602_PORT            GPIOA
-#define LCD1602_RS_PIN          GPIO_Pin_2
-#define LCD1602_EN_PIN          GPIO_Pin_3
-#define LCD1602_D4_PIN          GPIO_Pin_6
-#define LCD1602_D5_PIN          GPIO_Pin_7
-#define LCD1602_D6_PIN          GPIO_Pin_8
-#define LCD1602_D7_PIN          GPIO_Pin_15
-#define LCD1602_COLS            16U
-#define LCD1602_ROWS            2U
-
-/*===========================================================================*/
 /*  AT24C32 EEPROM (I2C)                                                     */
 /*===========================================================================*/
 #define EEPROM_I2C_ADDRESS      0xA0U   /* 7-bit 0x50 shifted left */

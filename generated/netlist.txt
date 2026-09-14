@@ -5,10 +5,10 @@ BUZZER
     PB3    BUZZER           Buzzer drive                 [both]
 
 I2C_SCL
-    PB10   MYI2C_SCL        I2C clock                    [real]
+    PB10   MYI2C_SCL        OLED/EEPROM I2C clock        [both]
 
 I2C_SDA
-    PB11   MYI2C_SDA        I2C data                     [real]
+    PB11   MYI2C_SDA        OLED/EEPROM I2C data         [both]
 
 KEY1
     PB5    KEY1             Start / stop                 [both]
@@ -21,24 +21,6 @@ KEY3
 
 KEY4
     PB8    KEY4             Manual close / e-stop        [both]
-
-LCD_D4
-    PA6    LCD1602_D4       1602 data bit 4              [sim]
-
-LCD_D5
-    PA7    LCD1602_D5       1602 data bit 5              [sim]
-
-LCD_D6
-    PA8    LCD1602_D6       1602 data bit 6              [sim]
-
-LCD_D7
-    PA15   LCD1602_D7       1602 data bit 7              [sim]
-
-LCD_EN
-    PA3    LCD1602_EN       1602 enable                  [sim]
-
-LCD_RS
-    PA2    LCD1602_RS       1602 register select         [sim]
 
 LED_STATUS
     PB4    STATUS_LED       Status LED (state blink)     [both]
