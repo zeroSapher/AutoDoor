@@ -30,14 +30,29 @@
 /*===========================================================================*/
 /*  Layout                                                                   */
 /*===========================================================================*/
-/* 128x64, using the 8x16 font for figures and the 6x8 font for footnotes. */
+/*
+ * 128x64, and the font sizes are an arithmetic constraint rather than taste:
+ * the 8x16 font is 8 px wide, so a line holds 128/8 = 16 characters, and the
+ * 6x8 font holds 128/6 = 21. The driver clips whatever does not fit - safely,
+ * per column, but silently - so every row here is sized to the text it actually
+ * has to hold, and the long names are shortened for the panel (see event_short).
+ *
+ *   row 1  8x16  the door state, and the countdown while one is running
+ *   row 2  8x16  enabled or not, and the mode
+ *   row 3  6x8   fault, full short name
+ *   row 4  6x8   record count
+ *   row 5  6x8   most recent event
+ *
+ * Two large rows carry what you read from across the room; three small rows
+ * carry the detail. 16 + 2 + 16 + 2 + 8 + 2 + 8 + 2 + 8 = 64 px exactly.
+ */
+#define ROW_STATE_Y     0U      /* 8x16 */
+#define ROW_MODE_Y      18U     /* 8x16 */
+#define ROW_FAULT_Y     36U     /* 6x8  */
+#define ROW_REC_Y       46U     /* 6x8  */
+#define ROW_LAST_Y      56U     /* 6x8  */
 
-#define ROW_TITLE_Y     0U      /* 8x16 */
-#define ROW_STATE_Y     18U     /* 8x16 */
-#define ROW_MODE_Y      36U     /* 8x16 */
-#define ROW_FOOT_Y      54U     /* 6x8  */
-
-/* The event screen uses the small font throughout so several lines fit. */
+/* The event and log screens use the small font throughout so several lines fit. */
 #define EVT_LINE_H      10U
 #define EVT_FIRST_Y     12U
 #define EVT_ROWS        5U
@@ -56,7 +71,6 @@ typedef struct
 
 static uint8_t  s_present = 0U;
 static uint8_t  s_dirty   = 1U;
-static uint8_t  s_staticDrawn = 0U;
 
 static DispScreen_t s_screen = DISP_SCREEN_STATUS;
 
@@ -99,6 +113,56 @@ static void fmt_timestamp(uint32_t ms, char *out, uint8_t outLen)
                    (unsigned long)seconds);
 }
 
+/**
+  * @brief  Short event name for the panel, at most 8 characters.
+  * @note   The console and the EEPROM keep the full names - Log_EventName() is
+  *         unchanged. These exist because a list row has to carry a timestamp
+  *         AND a name, and "FAULT_CLOSE_TIMEOUT" is 19 of the 21 characters a
+  *         6x8 row has, so the full name would push the timestamp off the edge.
+  *         8 characters leaves room for "0:00:12 " (8) plus the separator.
+  */
+static const char *event_short(uint8_t event)
+{
+    switch (event)
+    {
+        case LOG_EVT_ENTER:        return "ENTER";
+        case LOG_EVT_EXIT:         return "EXIT";
+        case LOG_EVT_OPEN_START:   return "OPEN>";
+        case LOG_EVT_CLOSE_START:  return "CLOSE>";
+        case LOG_EVT_OPEN_DONE:    return "OPENED";
+        case LOG_EVT_CLOSE_DONE:   return "CLOSED";
+        case LOG_EVT_REVERSE:      return "REVERSE";
+        case LOG_EVT_ESTOP:        return "ESTOP";
+        case LOG_EVT_FAULT_OPEN:   return "TO-OPEN";
+        case LOG_EVT_FAULT_CLOSE:  return "TO-CLOSE";
+        case LOG_EVT_MODE_CHANGE:  return "MODE";
+        case LOG_EVT_PARAM_CHANGE: return "PARAM";
+        case LOG_EVT_LIMIT_FAULT:  return "LIMIT!";
+        case LOG_EVT_SYSTEM_START: return "START";
+        case LOG_EVT_SYSTEM_STOP:  return "STOP";
+        default:                   return "EVENT";
+    }
+}
+
+/**
+  * @brief  Short fault name for the panel, at most 14 characters.
+  * @note   The row it goes on has 21 characters and already spends 6 on "FAULT ",
+  *         so 14 is the budget. Door_FaultName() keeps the long form for the
+  *         console and the log.
+  */
+static const char *fault_short(DoorFault_t fault)
+{
+    switch (fault)
+    {
+        case DOOR_FAULT_OPEN_TIMEOUT:    return "OPEN-TIMEOUT";
+        case DOOR_FAULT_CLOSE_TIMEOUT:   return "CLOSE-TIMEOUT";
+        case DOOR_FAULT_REVERSE_TIMEOUT: return "REV-TIMEOUT";
+        case DOOR_FAULT_LIMIT_CONFLICT:  return "LIMIT-CONFLICT";
+        case DOOR_FAULT_ESTOP:           return "ESTOP";
+        default:                         return "NONE";
+    }
+}
+
 /*===========================================================================*/
 /*  Screen: status                                                           */
 /*===========================================================================*/
@@ -120,49 +184,44 @@ static uint8_t s_showCountdownNeeded(void)
 static void draw_status(void)
 {
     char buf[24];
-    const char *faultName;
 
-    /* Static title row, drawn once. */
-    if (s_staticDrawn == 0U)
-    {
-        DispBk_Text(0, ROW_TITLE_Y, "AutoDoor", DISPBK_FONT_LARGE);
-        s_staticDrawn = 1U;
-    }
-
-    /* ---- Row 2: state, plus the countdown when one is running ------------- */
+    /* ---- Row 1 (large): the state, plus the countdown when one is running -- */
     if (s_showCountdownNeeded())
     {
-        /* Right-aligned countdown so the seconds do not jitter the layout. */
-        (void)Fmt_Format(buf, sizeof(buf), "%-9s %2us",
+        (void)Fmt_Format(buf, sizeof(buf), "%s %us",
                        Door_StateName(s_state),
                        (unsigned)((s_countdown + 999U) / 1000U));
     }
     else
     {
-        (void)Fmt_Format(buf, sizeof(buf), "%-12s", Door_StateName(s_state));
+        (void)Fmt_Format(buf, sizeof(buf), "%s", Door_StateName(s_state));
     }
     DispBk_Text(0, ROW_STATE_Y, buf, DISPBK_FONT_LARGE);
 
-    /* ---- Row 3: run flag, mode, fault ------------------------------------ */
-    faultName = (s_fault == DOOR_FAULT_NONE) ? "" : Door_FaultName(s_fault);
-    (void)Fmt_Format(buf, sizeof(buf), "%s %-6s %s",
-                   (s_running != 0U) ? "RUN " : "STOP",
-                   (s_mode == DOOR_MODE_AUTO) ? "AUTO" : "MAN",
-                   faultName);
+    /* ---- Row 2 (large): enabled or not, and the mode --------------------- */
+    (void)Fmt_Format(buf, sizeof(buf), "%s %s",
+                   (s_running != 0U) ? "RUN" : "STOP",
+                   (s_mode == DOOR_MODE_AUTO) ? "AUTO" : "MANUAL");
     DispBk_Text(0, ROW_MODE_Y, buf, DISPBK_FONT_LARGE);
 
-    /* ---- Footer: record count and the most recent event ------------------ */
+    /* ---- Row 3 (small): fault, full short name --------------------------- */
+    (void)Fmt_Format(buf, sizeof(buf), "FAULT %s", fault_short(s_fault));
+    DispBk_Text(0, ROW_FAULT_Y, buf, DISPBK_FONT_SMALL);
+
+    /* ---- Row 4 (small): record count ------------------------------------- */
+    (void)Fmt_Format(buf, sizeof(buf), "REC %u", (unsigned)s_records);
+    DispBk_Text(0, ROW_REC_Y, buf, DISPBK_FONT_SMALL);
+
+    /* ---- Row 5 (small): most recent event -------------------------------- */
     if (s_eventCount != 0U)
     {
-        (void)Fmt_Format(buf, sizeof(buf), "REC %-3u %s",
-                       (unsigned)s_records,
-                       Log_EventName(s_events[0].event));
+        (void)Fmt_Format(buf, sizeof(buf), "> %s", event_short(s_events[0].event));
     }
     else
     {
-        (void)Fmt_Format(buf, sizeof(buf), "REC %-3u no events", (unsigned)s_records);
+        (void)Fmt_Format(buf, sizeof(buf), "> (no events)");
     }
-    DispBk_Text(0, ROW_FOOT_Y, buf, DISPBK_FONT_SMALL);
+    DispBk_Text(0, ROW_LAST_Y, buf, DISPBK_FONT_SMALL);
 }
 
 /*===========================================================================*/
@@ -193,8 +252,9 @@ static void draw_events(void)
 
         fmt_timestamp(s_events[i].timestampMs, ts, sizeof(ts));
 
+        /* 8 (timestamp) + 1 + 8 (short event name) = 17 of the 21 that fit. */
         (void)Fmt_Format(line, sizeof(line), "%-8s %s",
-                       ts, Log_EventName(s_events[i].event));
+                       ts, event_short(s_events[i].event));
         DispBk_Text(0, (int16_t)(EVT_FIRST_Y + (i * EVT_LINE_H)), line, DISPBK_FONT_SMALL);
     }
 }
@@ -241,8 +301,9 @@ static void draw_log(void)
             break;
         }
 
+        /* 5 (sequence, at most 65535) + 1 + 8 = 14 of the 21 that fit. */
         (void)Fmt_Format(line, sizeof(line), "%u %s",
-                       (unsigned)e.seq, Log_EventName(e.event));
+                       (unsigned)e.seq, event_short(e.event));
         DispBk_Text(0, (int16_t)(EVT_FIRST_Y + (i * EVT_LINE_H)), line, DISPBK_FONT_SMALL);
     }
 }
@@ -254,7 +315,13 @@ static void draw_log(void)
 static void draw_message(void)
 {
     DispBk_Clear();
-    DispBk_Text(0, 12, s_msg1, DISPBK_FONT_LARGE);
+
+    /* 16 characters fit at 8x16 and 21 at 6x8. A transient overlay is better
+       shown small than clipped, so a long first line drops a size. (This has no
+       callers today - Display.h documents it as part of the panel contract - but
+       it is kept safe so it cannot become a trap when it gains one.) */
+    DispBk_Text(0, 12, s_msg1,
+                (strlen(s_msg1) <= 16U) ? DISPBK_FONT_LARGE : DISPBK_FONT_SMALL);
     DispBk_Text(0, 36, s_msg2, DISPBK_FONT_SMALL);
 }
 
@@ -271,7 +338,6 @@ void Display_Init(void)
     s_logOffset   = 0U;
     s_msgActive   = 0U;
     s_msgFrames   = 0U;
-    s_staticDrawn = 0U;
     s_dirty       = 1U;
     s_screen      = DISP_SCREEN_STATUS;
 
@@ -374,7 +440,6 @@ void Display_Update(void)
             /* Message expired: fall back to the active screen and force a full
                repaint, because the overlay cleared the framebuffer. */
             s_msgActive   = 0U;
-            s_staticDrawn = 0U;
         }
 
         DispBk_Flush();
@@ -388,12 +453,23 @@ void Display_Update(void)
 
     s_dirty = 0U;
 
-    /* Every screen except the status one repaints in full; only the status
-       screen has a static row worth preserving. */
-    if (s_screen != DISP_SCREEN_STATUS)
-    {
-        DispBk_Clear();
-    }
+    /*
+     * Clear the framebuffer on EVERY repaint, including the status screen.
+     *
+     * Only the non-status screens used to be cleared, with the status screen
+     * relying on a "static title drawn once" flag and on fixed-width field
+     * padding to avoid leftovers. That was fragile in a way that showed on the
+     * panel: OLED_ShowImage clears only the cells a glyph occupies, so any line
+     * that got SHORTER left the previous characters' pixels behind - a fault row
+     * going from "FAULT LIMIT-CONFLICT" back to "FAULT NONE" kept the tail of the
+     * old text visible on screen.
+     *
+     * Clearing here costs a memset of the 1 KB framebuffer and NO extra bus
+     * traffic, because the flush below already sends all 1024 bytes whenever the
+     * screen is dirty. So the residue is free to remove, and with it the
+     * fixed-width padding and the draw-once flag.
+     */
+    DispBk_Clear();
 
     switch (s_screen)
     {
@@ -427,9 +503,8 @@ void Display_SetScreen(DispScreen_t screen)
 
     if (screen != s_screen)
     {
-        s_screen      = screen;
-        s_staticDrawn = 0U;     /* the status title must be redrawn */
-        s_dirty       = 1U;
+        s_screen = screen;
+        s_dirty  = 1U;
 
         if (screen == DISP_SCREEN_LOG)
         {
