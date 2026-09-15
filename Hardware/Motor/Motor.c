@@ -1,169 +1,102 @@
 /**
   ******************************************************************************
   * @file    Motor.c
-  * @brief   TB6612FNG driver: direction, speed ramp, software PWM, standby.
+  * @brief   SG90 servo actuator: position commanded over hardware PWM.
   *
-  * PIN ARRANGEMENT
-  * ---------------
-  * The TB6612 takes the direction on two static inputs and the speed on a
-  * separate PWM input, so unlike the L9110S this firmware used to drive, the
-  * carrier never touches a direction pin. Reversing therefore cannot chatter the
-  * direction inputs, and the dead time below only has to let the current decay.
+  * WHY THIS IS NOT A DRIVER SWAP
+  * -----------------------------
+  * The L9110S/TB6612 builds drive a CONTINUOUS-ROTATION motor: they command a
+  * direction plus a duty and keep driving until told to stop, which is why that
+  * firmware needs a travel estimate and a story about end stops.
   *
-  * SOFTWARE PWM
-  * ------------
-  * A 20 kHz carrier - the frequency that would keep the motor electrically quiet -
-  * is not reachable in software: at 72 MHz an interrupt every 20 us leaves only
-  * 1440 cycles, far too little once the door state machine shares the CPU.
+  * An SG90 is a POSITION actuator. It takes a 50 Hz pulse train, moves to the
+  * angle the pulse width encodes, and then HOLDS it against load. Open and closed
+  * are two pulse widths, there is no duty to modulate, and a servo that is not
+  * being moved is already holding the door - the behaviour the DC version could
+  * only approximate by calling Motor_Brake() (which it never did).
   *
-  * Instead the carrier runs slowly and cheaply: the 1 ms SysTick handler advances
-  * a phase accumulator and drives PWMA from it, giving a 100 Hz carrier with 1 %
-  * duty resolution (see the PWM geometry note below). One interrupt per
-  * millisecond costs a few dozen cycles, and 100 Hz is orders of magnitude faster
-  * than any mechanical time constant of a model door, so the motion is smooth.
-  * There is a faint audible hum from the motor; if that ever becomes
-  * objectionable the fix is to move PWMA onto TIM3_CH3 (it is already on PB0 for
-  * exactly that reason) without changing this API.
+  *   pulse SERVO_CLOSED_US -> door closed
+  *   pulse SERVO_OPEN_US   -> door open
   *
-  * DEAD TIME
-  * ---------
-  * Reversing an H-bridge while current is still flowing is the classic way to
-  * destroy it. Motor_Run() therefore always inserts MOTOR_DEADTIME_MS with the
-  * outputs released before applying a new direction.
+  * THE SLEW, AND WHY IT IS THE INTERESTING PART
+  * -------------------------------------------
+  * An SG90 covers that span in roughly 150 ms, which would slam the door. Instead
+  * Motor_Tick1ms() walks the emitted pulse toward the target one step per
+  * millisecond, so the servo FOLLOWS the commanded pulse and the door moves
+  * gently. The step is derived from DOOR_TRAVEL_MS, which makes the two agree by
+  * construction:
+  *
+  *   step = (SERVO_OPEN_US - SERVO_CLOSED_US) / DOOR_TRAVEL_MS
+  *
+  * so the firmware's timed position estimate and the servo's real travel are the
+  * same number. On the DC-motor builds that estimate was a guess that had to be
+  * calibrated against the mechanism; here it is exact, because this driver decides
+  * how fast the pulse travels.
+  *
+  * Freezing is real: Motor_Stop() points the target at the current pulse, so a
+  * move can be halted mid-travel (and Motor_EmergencyStop() freezes instantly)
+  * while the servo keeps holding that position. There is no coast state to fall
+  * back on - see the note on Motor_EmergencyStop().
+  *
+  * TIMING: TIM3 is clocked at 72 MHz (APB1 timer clock is doubled), so PSC=71
+  * gives a 1 us tick and ARR=20000-1 a 20 ms period. CCR1 is then literally the
+  * pulse width in microseconds. A different HSE would break that arithmetic in
+  * the same way it would break the SysTick 1 ms setup.
   ******************************************************************************
   */
 
 #include "Motor.h"
 #include "main.h"
 #include "Delay.h"
+#include <stddef.h>
 
 /*===========================================================================*/
-/*  Pin macros                                                               */
+/*  Geometry                                                                 */
 /*===========================================================================*/
 
-#define PWM_HIGH()      GPIO_SetBits(MOTOR_PWM_PORT, MOTOR_PWM_PIN)
-#define PWM_LOW()       GPIO_ResetBits(MOTOR_PWM_PORT, MOTOR_PWM_PIN)
-#define STBY_HIGH()     GPIO_SetBits(MOTOR_STBY_PORT, MOTOR_STBY_PIN)
-#define STBY_LOW()      GPIO_ResetBits(MOTOR_STBY_PORT, MOTOR_STBY_PIN)
+/* One step of the slew, in microseconds per millisecond. Derived so the pulse
+   reaches the far end exactly when the state machine's timed estimate says it
+   has; the compile-time check below rejects a DOOR_TRAVEL_MS so long that the
+   division would round the step down to nothing. */
+#define SLEW_STEP_US        ((SERVO_OPEN_US - SERVO_CLOSED_US) / DOOR_TRAVEL_MS)
 
-/**
-  * @brief  Write both direction inputs in ONE store.
-  *
-  * They live on the same port, so BSRR can change both atomically. Writing them
-  * one after the other is what let a pin check catch the intermediate
-  * combination: turning from CLOSE (AIN1=0, AIN2=1) to OPEN sets AIN1 first, so
-  * for the few nanoseconds between the two stores the bridge sees 1/1 - the brake
-  * state. Brake is legal and the glitch is far too short to matter mechanically,
-  * but the whole point of this part is that the direction inputs are STATIC for a
-  * move, and one store is what makes that actually true.
-  */
-static void write_direction(uint8_t ain1High, uint8_t ain2High)
-{
-    uint32_t bsrr;
-
-    bsrr  = (ain1High != 0U) ? (uint32_t)MOTOR_AIN1_PIN
-                             : ((uint32_t)MOTOR_AIN1_PIN << 16U);
-    bsrr |= (ain2High != 0U) ? (uint32_t)MOTOR_AIN2_PIN
-                             : ((uint32_t)MOTOR_AIN2_PIN << 16U);
-
-    MOTOR_AIN1_PORT->BSRR = bsrr;
-}
-
-/*
- * Software PWM geometry.
- *
- * One carrier cycle spans PWM_CYCLE_TICKS SysTick ticks (1 tick = 1 ms). The
- * phase accumulator advances PWM_STEP_PER_TICK per tick and wraps at
- * PWM_PHASE_MAX, so a cycle completes every
- *
- *     PWM_CYCLE_TICKS = PWM_PHASE_MAX / PWM_STEP_PER_TICK = 100 / 10 = 10 ms
- *
- * i.e. a 100 Hz carrier, and the output is high for `duty` of the 100 phase
- * steps => 1 % duty resolution, controllable to a 1 ms granularity.
- *
- * 100 Hz is low for a motor carrier - it is audible and it puts a little torque
- * ripple on the shaft - but it is comfortably above the mechanical time constant
- * of a model door, and it costs one interrupt per millisecond. That trade is
- * deliberate: hardware PWM at 20 kHz would need TIM3 and a pin remap, and the
- * objective is a quiet, working mechanism rather than a silent one.
- */
-#define PWM_PHASE_MAX           100U    /* duty resolution == 100 percent   */
-#define PWM_STEP_PER_TICK       10U     /* => 10 ms per carrier cycle       */
-
-/*
- * Ramp rate, in duty percent per millisecond. 100 % over MOTOR_RAMP_UP_MS
- * gives 100/400 = 0.25 %/ms, which is below 1 so the ramp accumulates
- * fractional progress in "permille of a percent" instead of stalling.
- * RAMP_STEP_INTERVAL is how many ms between single-percent increments.
- */
-#define RAMP_UP_INTERVAL_MS     (MOTOR_RAMP_UP_MS / 100U)     /* 4 ms  */
-#define RAMP_DOWN_INTERVAL_MS   (MOTOR_RAMP_DOWN_MS / 100U)   /* 2 ms  */
+_Static_assert((SERVO_OPEN_US > SERVO_CLOSED_US),
+               "servo open pulse must be longer than the closed pulse");
+_Static_assert(((SERVO_OPEN_US - SERVO_CLOSED_US) >= DOOR_TRAVEL_MS),
+               "DOOR_TRAVEL_MS is longer than the pulse span in microseconds, so "
+               "the slew step would be 0 and the servo would never move");
 
 /*===========================================================================*/
 /*  Internal state                                                           */
 /*===========================================================================*/
 
-static volatile MotorDir_t s_dir       = MOTOR_DIR_STOP;
-static volatile uint8_t    s_dutyNow   = 0U;   /* applied duty, percent   */
-static volatile uint8_t    s_dutyTarget = 0U;  /* requested duty, percent */
-static volatile uint8_t    s_phase     = 0U;   /* software PWM phase      */
-static uint8_t             s_rampAccum = 0U;   /* ms accumulator for ramp */
-static uint8_t             s_initialised = 0U;
+static volatile MotorDir_t s_dir          = MOTOR_DIR_STOP;
+static volatile uint16_t   s_pulseNow     = SERVO_CLOSED_US;
+static volatile uint16_t   s_pulseTarget  = SERVO_CLOSED_US;
+static uint8_t             s_initialised  = 0U;
 
 /*===========================================================================*/
 /*  Helpers                                                                  */
 /*===========================================================================*/
 
-/**
-  * @brief  Drive IA/IB for a direction, applying the current duty.
-  * @param  dir    Direction to encode.
-  * @param  output 1 to energise, 0 to release both outputs.
-  * @note   Only called with a direction that is not STOP/BRAKE when output=1.
-  */
-static void apply_output(MotorDir_t dir, uint8_t output)
+/** Emit a pulse width. Written straight to CCR1: the timer does the rest. */
+static void emit_pulse(uint16_t us)
 {
-    /*
-     * The direction pins are written on every call, including during the low half
-     * of the carrier cycle. They are static for the whole move, so this costs
-     * nothing and leaves them defined instead of depending on what the previous
-     * call happened to leave behind.
-     */
-    switch (dir)
-    {
-        case MOTOR_DIR_OPEN:
-            write_direction(1U, 0U);
-            break;
-
-        case MOTOR_DIR_CLOSE:
-            write_direction(0U, 1U);
-            break;
-
-        case MOTOR_DIR_BRAKE:
-            write_direction(1U, 1U);
-            break;
-
-        case MOTOR_DIR_STOP:
-        default:
-            write_direction(0U, 0U);
-            break;
-    }
-
-    /* The carrier: high = the direction above is driven, low = not driven. */
-    if (output != 0U)
-    {
-        PWM_HIGH();
-    }
-    else
-    {
-        PWM_LOW();
-    }
+    TIM_SetCompare1(SERVO_TIM, (uint16_t)us);
 }
 
-/** Release the bridge: direction inputs low and the carrier low (no drive). */
-static void outputs_release(void)
+/** @return The duty equivalent of a pulse, for the status reporting path. */
+static uint8_t pulse_to_percent(uint16_t us)
 {
-    write_direction(0U, 0U);
-    PWM_LOW();
+    uint32_t span = (uint32_t)(SERVO_OPEN_US - SERVO_CLOSED_US);
+    uint32_t off  = (us > SERVO_CLOSED_US) ? (uint32_t)(us - SERVO_CLOSED_US) : 0U;
+
+    if (off >= span)
+    {
+        return 100U;
+    }
+
+    return (uint8_t)((off * 100U) / span);
 }
 
 /*===========================================================================*/
@@ -172,129 +105,116 @@ static void outputs_release(void)
 
 void Motor_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStructure;
+    GPIO_InitTypeDef        GPIO_InitStructure;
+    TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
+    TIM_OCInitTypeDef       TIM_OCInitStructure;
 
-    RCC_APB2PeriphClockCmd(MOTOR_RCC, ENABLE);
+    RCC_APB1PeriphClockCmd(SERVO_TIM_RCC, ENABLE);
+    RCC_APB2PeriphClockCmd(SERVO_RCC, ENABLE);
 
-    /* Drive every pin to its harmless level BEFORE switching it to an output, and
-       leave the driver in standby, so power-up cannot kick the motor. STBY low is
-       the TB6612's own disable: the outputs stay off whatever the inputs say. */
-    write_direction(0U, 0U);
-    PWM_LOW();
-    STBY_LOW();
-
-    GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_Out_PP;
+    /* PA6 as TIM3_CH1, alternate function push-pull. */
+    GPIO_InitStructure.GPIO_Pin   = SERVO_PIN;
+    GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_PP;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(SERVO_PORT, &GPIO_InitStructure);
 
-    GPIO_InitStructure.GPIO_Pin = MOTOR_AIN1_PIN | MOTOR_AIN2_PIN;
-    GPIO_Init(MOTOR_AIN1_PORT, &GPIO_InitStructure);
+    /* 1 us tick, 20 ms period => CCR1 is a pulse width in microseconds. */
+    TIM_TimeBaseStructure.TIM_Prescaler         = (uint16_t)((SERVO_TIMER_HZ / 1000000U) - 1U);
+    TIM_TimeBaseStructure.TIM_Period            = (uint16_t)(SERVO_PERIOD_US - 1U);
+    TIM_TimeBaseStructure.TIM_ClockDivision     = TIM_CKD_DIV1;
+    TIM_TimeBaseStructure.TIM_CounterMode       = TIM_CounterMode_Up;
+    TIM_TimeBaseInit(SERVO_TIM, &TIM_TimeBaseStructure);
 
-    GPIO_InitStructure.GPIO_Pin = MOTOR_PWM_PIN | MOTOR_STBY_PIN;
-    GPIO_Init(MOTOR_PWM_PORT, &GPIO_InitStructure);
+    TIM_OCInitStructure.TIM_OCMode      = TIM_OCMode_PWM1;
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse       = SERVO_CLOSED_US;
+    TIM_OCInitStructure.TIM_OCPolarity  = TIM_OCPolarity_High;
+    TIM_OC1Init(SERVO_TIM, &TIM_OCInitStructure);
+    TIM_OC1PreloadConfig(SERVO_TIM, TIM_OCPreload_Enable);
 
+    TIM_ARRPreloadConfig(SERVO_TIM, ENABLE);
+    TIM_Cmd(SERVO_TIM, ENABLE);
+
+    /* Power up pointing at "closed", holding it, so the door cannot drift while
+       the rest of the firmware is still initialising. */
     s_dir         = MOTOR_DIR_STOP;
-    s_dutyNow     = 0U;
-    s_dutyTarget  = 0U;
-    s_phase       = 0U;
-    s_rampAccum   = 0U;
+    s_pulseNow    = SERVO_CLOSED_US;
+    s_pulseTarget = SERVO_CLOSED_US;
+    emit_pulse(s_pulseNow);
     s_initialised = 1U;
-}
-
-void Motor_EmergencyStop(void)
-{
-    /* No ramp, no delay block: this runs from the limit/estop interrupt. */
-    outputs_release();
-
-    /* ...and drop STBY as well. This is the one place a torn write could not
-       undo: with the driver in standby the outputs are off no matter what the
-       direction pins were left holding. */
-    STBY_LOW();
-
-    s_dir        = MOTOR_DIR_STOP;
-    s_dutyNow    = 0U;
-    s_dutyTarget = 0U;
-    s_phase      = 0U;
-    s_rampAccum  = 0U;
-}
-
-void Motor_Brake(void)
-{
-    s_dir        = MOTOR_DIR_BRAKE;
-    s_dutyTarget = 0U;          /* no modulation: both low sides stay on */
-    s_dutyNow    = 0U;
-    apply_output(MOTOR_DIR_BRAKE, 1U);
-}
-
-void Motor_Stop(void)
-{
-    /* Ramp down rather than cutting, unless already slow enough to just stop.
-       Blocking here is acceptable because every caller is in the main loop. */
-    if (s_dutyNow >= 5U)
-    {
-        s_dutyTarget = 0U;
-        while (s_dutyNow != 0U)
-        {
-            Delay_ms(1U);       /* lets Motor_Tick1ms() run the ramp down */
-        }
-    }
-
-    outputs_release();
-    s_dir       = MOTOR_DIR_STOP;
-    s_dutyNow   = 0U;
-    s_dutyTarget = 0U;
-    s_phase     = 0U;
 }
 
 void Motor_Run(MotorDir_t dir)
 {
-    if ((dir != MOTOR_DIR_OPEN) && (dir != MOTOR_DIR_CLOSE))
+    if (s_initialised == 0U)
     {
-        Motor_Stop();
         return;
     }
 
-    /* Dead time on any direction change - including from a stop, which is
-       cheap and keeps the rule unconditional and easy to audit. */
-    if (dir != s_dir)
+    if (dir == MOTOR_DIR_OPEN)
     {
-        outputs_release();
-        s_dir       = MOTOR_DIR_STOP;
-        s_dutyNow   = 0U;
-        s_dutyTarget = 0U;
-        Delay_ms(MOTOR_DEADTIME_MS);
+        s_dir         = MOTOR_DIR_OPEN;
+        s_pulseTarget = SERVO_OPEN_US;
     }
-
-    s_dir = dir;
-
-    if (s_dutyTarget < MOTOR_MIN_DUTY)
+    else if (dir == MOTOR_DIR_CLOSE)
     {
-        s_dutyTarget = MOTOR_MIN_DUTY;
+        s_dir         = MOTOR_DIR_CLOSE;
+        s_pulseTarget = SERVO_CLOSED_US;
     }
+    else
+    {
+        /* Anything else is not a move: treat it as Stop so a bad call cannot leave
+           the door running to a target nobody asked for. */
+        Motor_Stop();
+    }
+}
 
-    /* Start from zero so the ramp always runs; this is what limits inrush on a
-       stalled 130 motor, whose locked-rotor current is several times rated. */
-    s_dutyNow   = 0U;
-    s_rampAccum = 0U;
+void Motor_Stop(void)
+{
+    /* Freeze where we are. The servo keeps holding this pulse, so the door stays
+       put - for a servo "stopped" and "locked" are the same thing. */
+    s_pulseTarget = s_pulseNow;
+    s_dir         = MOTOR_DIR_STOP;
+}
 
-    /* Put the direction on the pins with the carrier still low, and only THEN
-       enable the driver. Raising STBY first would let the chip drive whatever the
-       direction pins happened to hold from the previous move. */
-    apply_output(dir, 0U);
-    STBY_HIGH();
+void Motor_Brake(void)
+{
+    /* Identical to Stop here, and that is not a shortcut: a servo holds its
+       position whenever it is powered, so there is no separate braking state to
+       enter. The API keeps the call for the builds that do have one. */
+    Motor_Stop();
+    s_dir = MOTOR_DIR_BRAKE;
+}
+
+void Motor_EmergencyStop(void)
+{
+    /* Freeze at the pulse that is on the wire right now, not at the target: an
+       emergency stop must not let the door finish a move it has started.
+       Unlike the H-bridge builds there is NO coast state to fall back on - a servo
+       with no pulses goes limp, and a door that falls open or shut by itself is
+       not a safer failure. Holding is the safe state here, and the position is
+       only as wrong as it already was.
+       (If a pushable door is wanted instead, disabling the channel - TIM_Cmd(
+       SERVO_TIM, DISABLE) - detaches the servo. That is a deliberate behaviour
+       choice, not a tuning knob, so it is not the default.) */
+    s_pulseTarget = s_pulseNow;
+    s_dir         = MOTOR_DIR_STOP;
+    emit_pulse(s_pulseNow);
 }
 
 void Motor_SetDuty(uint8_t percent)
 {
-    if (percent > 100U)
-    {
-        percent = 100U;
-    }
-    s_dutyTarget = percent;
+    /* Accepted and ignored: an SG90's speed is fixed by the servo, not by a duty
+       cycle, and this driver's only speed control is the slew step. The callers
+       keep calling it because they are shared with the motor builds; SPEED=<%> is
+       answered with "n/a" on this branch so nobody is told a number was applied. */
+    (void)percent;
 }
 
 uint8_t Motor_GetDuty(void)
 {
-    return s_dutyNow;
+    /* Report travel as a percentage so the status path stays meaningful. */
+    return pulse_to_percent(s_pulseNow);
 }
 
 MotorDir_t Motor_GetDir(void)
@@ -304,7 +224,7 @@ MotorDir_t Motor_GetDir(void)
 
 uint8_t Motor_IsRamping(void)
 {
-    return (s_dutyNow != s_dutyTarget) ? 1U : 0U;
+    return (s_pulseNow != s_pulseTarget) ? 1U : 0U;
 }
 
 uint8_t Motor_IsIdle(void)
@@ -319,72 +239,23 @@ void Motor_Tick1ms(void)
         return;
     }
 
-    /* ---- 1. Speed ramp ---------------------------------------------------- */
-    if (s_dutyNow != s_dutyTarget)
+    if (s_pulseNow == s_pulseTarget)
     {
-        s_rampAccum++;
+        return;
+    }
 
-        if (s_dutyNow < s_dutyTarget)
-        {
-            if (s_rampAccum >= RAMP_UP_INTERVAL_MS)
-            {
-                s_rampAccum = 0U;
-                s_dutyNow++;
-            }
-        }
-        else
-        {
-            if (s_rampAccum >= RAMP_DOWN_INTERVAL_MS)
-            {
-                s_rampAccum = 0U;
-                s_dutyNow--;
-            }
-        }
+    if (s_pulseNow < s_pulseTarget)
+    {
+        uint16_t next = (uint16_t)(s_pulseNow + SLEW_STEP_US);
+
+        s_pulseNow = (next > s_pulseTarget) ? s_pulseTarget : next;
     }
     else
     {
-        s_rampAccum = 0U;
+        uint16_t next = (uint16_t)(s_pulseNow - SLEW_STEP_US);
+
+        s_pulseNow = (next < s_pulseTarget) ? s_pulseTarget : next;
     }
 
-    /* ---- 2. Software PWM carrier ----------------------------------------- */
-    if (s_dir == MOTOR_DIR_BRAKE)
-    {
-        /* Braking is a DRIVEN state (both low sides on), so it is re-asserted
-           rather than released. */
-        apply_output(MOTOR_DIR_BRAKE, 1U);
-        s_phase = 0U;
-        return;
-    }
-
-    if ((s_dir != MOTOR_DIR_OPEN) && (s_dir != MOTOR_DIR_CLOSE))
-    {
-        /*
-         * Idle: re-release the bridge on every tick instead of assuming the pins
-         * are already low.
-         *
-         * apply_output() and outputs_release() each write IA and IB with two
-         * separate stores, and this tick runs in the SysTick interrupt, so it can
-         * land BETWEEN those two writes when the main loop is stopping the motor.
-         * The half-written result - one side driven - would then stay on the
-         * bridge forever: once s_dir is STOP, nothing else ever writes these
-         * pins. A motor left energised after an emergency stop would simply keep
-         * running, and the travel watchdog cannot catch it because the state is
-         * no longer "travelling". That was reproduced on hardware: the bridge was
-         * driven by hand, s_dir was set to STOP, and a full second of ticks left
-         * the outputs exactly as they were.
-         *
-         * Two GPIO writes per millisecond make the stopped state self-healing.
-         */
-        outputs_release();
-        s_phase = 0U;
-        return;
-    }
-
-    s_phase = (uint8_t)(s_phase + PWM_STEP_PER_TICK);
-    if (s_phase >= PWM_PHASE_MAX)
-    {
-        s_phase = 0U;
-    }
-
-    apply_output(s_dir, (s_phase < s_dutyNow) ? 1U : 0U);
+    emit_pulse(s_pulseNow);
 }

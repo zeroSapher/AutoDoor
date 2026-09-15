@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    Motor.h
-  * @brief   TB6612FNG driver: direction, speed ramp, software PWM, standby.
+  * @brief   SG90 servo actuator: position commanded over hardware PWM, slewed.
   ******************************************************************************
   */
 

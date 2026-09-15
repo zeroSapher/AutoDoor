@@ -121,7 +121,6 @@ void Cmd_ReportStatus(void)
     UART_Printf(" DOOR=%s", Door_StateName(Door_GetState()));
     UART_Printf(" FAULT=%s", Door_FaultName(Door_GetFault()));
     UART_Printf(" DELAY=%ums", (unsigned)Door_GetAutoCloseMs());
-    UART_Printf(" SPEED=%u%%", (unsigned)Door_GetTravelDuty());
     UART_Printf(" CNT=%u", (unsigned)Log_Count());
     UART_Printf(" TOTAL=%lu", (unsigned long)Log_TotalEvents());
 
@@ -440,6 +439,11 @@ void Cmd_Process(void)
     /* ---- SPEED=<%> ------------------------------------------------------ */
     if (strncmp(line, "SPEED=", 6) == 0)
     {
+        /* An SG90 has no duty to set: its speed is fixed by the servo, and the only
+           thing shaping motion on this branch is DOOR_TRAVEL_MS (the slew step is
+           derived from it). Saying so beats accepting a number and ignoring it. */
+        UART_SendString("ERR N/A - SG90 speed is fixed (tune DOOR_TRAVEL_MS)\r\n");
+        return;
         if (parse_u32(&line[6], &value) != 0U)
         {
             UART_SendString("ERR BAD_ARG\r\n");

@@ -220,9 +220,10 @@ extern "C" {
 #define AUTODOOR_NO_LIMITS      1
 #endif
 
-/* End-to-end travel, in milliseconds - a calibration constant for the real door,
-   not a bench convenience. Measure it, then add margin; see the notes above. */
-#define DOOR_TRAVEL_MS          2000U
+/* Full travel, in milliseconds. On this branch it is NOT a guess to be calibrated:
+   Hardware/Motor/Motor.c derives the servo slew step from it, so the door takes
+   this long by construction and the position estimate is exact. */
+#define DOOR_TRAVEL_MS          1000U
 
 /*===========================================================================*/
 /*  Presence sensors simulated by keys on this branch                       */
@@ -335,50 +336,48 @@ typedef char exti_inputs_must_occupy_distinct_line_numbers[
 #define STATUS_LED_PIN          GPIO_Pin_4
 
 /*===========================================================================*/
-/*  Motor - TB6612FNG dual H-bridge                                          */
+/*  Motor - SG90 servo on TIM3_CH1 (hardware PWM)                            */
 /*===========================================================================*/
 /*
- * TB6612FNG, channel A. The direction is set by two STATIC logic inputs and the
- * speed is a SEPARATE PWM input - the opposite arrangement to the L9110S this
- * firmware used to drive, and the whole reason this block changed:
+ * SG90 micro servo. It is a POSITION actuator, not a motor: a 50 Hz pulse train
+ * encodes an angle, the servo drives to it and then holds it against load. There
+ * is no direction pair, no duty cycle and no coast - see Hardware/Motor/Motor.c
+ * for how that maps onto the existing Motor_* API, and why the slew is derived
+ * from DOOR_TRAVEL_MS rather than being tuned by hand.
  *
- *   AIN1 AIN2 PWMA   result
- *     0    0    x    stop    - outputs off, motor coasts
- *     0    1    1    reverse
- *     1    0    1    forward
- *     1    1    1    brake   - outputs shorted, the motor resists turning
- *     x    x    0    not driven. The TB6612 pulls both outputs low during the low
- *                    half of every carrier cycle, i.e. it brakes rather than
- *                    coasts there. That is normal for this part and does not
- *                    change how the door moves at a 100 Hz carrier.
+ *   pulse SERVO_CLOSED_US -> door closed
+ *   pulse SERVO_OPEN_US   -> door open
  *
- * STBY must be HIGH for the channel to work at all, so it doubles as a hard
- * disable: Motor_EmergencyStop() drops it. That is a SECOND MCU-controlled way to
- * de-energise the bridge which the L9110S could not offer - but it is still just
- * the MCU driving a pin, so it is NOT an independent safety layer and not a
- * substitute for the mechanical cut that was abandoned (docs/接线图.md section 5).
+ * PA6 is TIM3_CH1. TIM3 is clocked at 72 MHz, so PSC gives a 1 us tick and
+ * ARR = SERVO_PERIOD_US - 1 a 20 ms period, which makes CCR1 the pulse width in
+ * microseconds. Do not move this pin without also moving the timer channel.
  *
- * PWMA is on PB0 because PB0 is TIM3_CH3: moving this carrier to hardware PWM
- * later becomes a pin-function change instead of a rewire.
+ * POWER: an SG90 stalls at several hundred milliamps and MUST NOT be fed from the
+ * MCU's 3V3 rail or from the ST-Link's 5 V pin - give it its own 5 V supply and a
+ * common ground, or the board browns out and resets mid-move.
  */
-#define MOTOR_RCC               (RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB)
-#define MOTOR_AIN1_PORT         GPIOA
-#define MOTOR_AIN1_PIN          GPIO_Pin_4
-#define MOTOR_AIN2_PORT         GPIOA
-#define MOTOR_AIN2_PIN          GPIO_Pin_5
-#define MOTOR_PWM_PORT          GPIOB
-#define MOTOR_PWM_PIN           GPIO_Pin_0     /* TIM3_CH3 */
-#define MOTOR_STBY_PORT         GPIOB
-#define MOTOR_STBY_PIN          GPIO_Pin_1
+#define SERVO_RCC               RCC_APB2Periph_GPIOA
+#define SERVO_TIM_RCC           RCC_APB1Periph_TIM3
+#define SERVO_PORT              GPIOA
+#define SERVO_PIN               GPIO_Pin_6
+#define SERVO_TIM               TIM3
+#define SERVO_TIMER_HZ          72000000U   /* APB1 timers run at HCLK here */
+#define SERVO_PERIOD_US         20000U      /* 50 Hz */
 
-/* Documentation only - the real carrier is PWM_PHASE_MAX / PWM_STEP_PER_TICK in
-   Hardware/Motor/Motor.c (100 steps per 10 ms = 100 Hz). This macro used to claim
-   1000 and nothing referenced it, which is how it drifted out of date. */
-#define MOTOR_PWM_FREQ_HZ       100U
-#define MOTOR_PWM_LEVELS        100U    /* duty resolution: 1 % steps */
-#define MOTOR_DEADTIME_MS       20U     /* IA=IB=0 guard on every reversal */
-#define MOTOR_RAMP_UP_MS        400U    /* 0 -> target duty, avoids inrush */
-#define MOTOR_RAMP_DOWN_MS      200U
+/* Pulse widths. 1000..2000 us is a 90 degree swing, which is all a door needs and
+   stays clear of the servo's mechanical stops; pushing past ~2400 us makes an
+   SG90 buzz against its end stop instead of moving further. */
+#define SERVO_CLOSED_US         1000U
+#define SERVO_OPEN_US           2000U
+
+/* The DC-motor builds' carrier macro, kept because the shared code and the docs
+   reference it; on this branch it documents the servo frame rate, not a carrier.
+   MOTOR_DEFAULT_DUTY / MOTOR_MIN_DUTY / MOTOR_DUTY_MIN / MOTOR_DUTY_MAX are
+   defined further down and are unused here - Motor_SetDuty() ignores them. */
+#define MOTOR_PWM_FREQ_HZ       50U
+/* Dead time and ramps belong to the H-bridge builds: a servo input is a logic
+   signal with no shoot-through risk, and its soft start IS the slew. */
+#define MOTOR_DEADTIME_MS       0U
 #define MOTOR_DEFAULT_DUTY      70U     /* percent for normal travel */
 #define MOTOR_MIN_DUTY          25U     /* below this a 130 motor will not turn */
 /*

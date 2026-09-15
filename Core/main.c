@@ -23,7 +23,7 @@
   *   sensor out    PB12  (EXTI12) sensor in    PB13  (EXTI13)
   *   keys          PB5..PB8 (EXTI5..8)
   *   buzzer        PB3            status LED   PB4
-  *   motor         AIN1/AIN2 PA4/PA5, PWMA PB0, STBY PB1 -> TB6612FNG
+  *   servo         PA6 (TIM3_CH1, 50 Hz hardware PWM) -> SG90
   *   console       PA9/PA10 (USART1, 115200 8N1)
   *
   * No limit switches are fitted: PA0/PA1 are unconnected and claim no EXTI line
