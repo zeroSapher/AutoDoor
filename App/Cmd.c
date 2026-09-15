@@ -61,10 +61,15 @@ static const char *mode_name(DoorMode_t m)
 
 void Cmd_Init(void)
 {
+    /* The EFFECTIVE delay, not the persisted one. Log_GetAutoCloseMs() returns
+       what was read out of the EEPROM, which is 0 when no EEPROM answered - and
+       this banner then claimed "delay=0ms" while STATUS? reported DELAY=5000ms
+       for the very same running system. main.c has already applied the fallback
+       by this point, so the live value is the only one that is not a lie. */
     UART_Printf("\r\nAutoDoor ready. boot#%u  records=%u  delay=%ums\r\n",
                 (unsigned)Log_GetBootId(),
                 (unsigned)Log_Count(),
-                (unsigned)Log_GetAutoCloseMs());
+                (unsigned)Door_GetAutoCloseMs());
     UART_SendString("type HELP for commands\r\n");
 }
 

@@ -248,9 +248,14 @@ void UART_NewLine(void)
 
 void UART_Printf(const char *format, ...)
 {
-    char    buffer[64];
+    char    buffer[UART_PRINTF_BUFFER_SIZE];
     int     len;
     va_list args;
+
+    if (format == 0)
+    {
+        return;
+    }
 
     va_start(args, format);
     len = vsnprintf(buffer, sizeof(buffer), format, args);
@@ -260,9 +265,19 @@ void UART_Printf(const char *format, ...)
     {
         return;
     }
-    if (len > (int)(sizeof(buffer) - 1U))
+
+    if (len >= (int)sizeof(buffer))
     {
-        len = (int)(sizeof(buffer) - 1U);   /* truncated */
+        /* The formatted text did not fit, so vsnprintf() cut it short - and what
+           it cuts is the trailing "\r\n", which glues this message to whatever is
+           printed next: the boot log once showed a door-state event spliced into
+           the middle of a truncated limit report. Send the part that fits plus an
+           explicit marker, so a format string that outgrows the buffer becomes a
+           visible defect instead of silently corrupting an unrelated line.
+           Fix by raising UART_PRINTF_BUFFER_SIZE or splitting the format. */
+        UART_SendBytes((const uint8_t *)buffer, (uint16_t)(sizeof(buffer) - 1U));
+        UART_SendString("...\r\n");
+        return;
     }
 
     UART_SendBytes((const uint8_t *)buffer, (uint16_t)len);

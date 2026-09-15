@@ -60,6 +60,21 @@ extern "C" {
 #define UART_BAUDRATE           115200U
 #define UART_RX_BUFFER_SIZE     128U    /* must be a power of two */
 /*
+ * Working buffer for one UART_Printf() call. It must fit the longest formatted
+ * line the firmware prints, terminator included.
+ *
+ * This used to be 64, which is smaller than several lines the firmware actually
+ * emits: the bench-mode "Limits : *** SIMULATED ***" line formats to 69
+ * characters. vsnprintf() truncated it to 63, which cut the "\r\n" too - so the
+ * next line was appended to it and the boot log showed a door-state event glued
+ * onto the middle of the limit report. Nothing was lost on the wire and no ISR
+ * was involved; the whole artefact was this buffer being too small. The
+ * truncation handler in UART_Printf() now makes a recurrence obvious instead of
+ * silent, and the worst line in the firmware (the "BOTH ASSERTED" wiring-fault
+ * warning, ~71 characters) fits with room to spare.
+ */
+#define UART_PRINTF_BUFFER_SIZE 128U
+/*
  * Assembled-line buffer owned by UART.c, NOT by the caller of UART_ReadLine().
  *
  * A command line does not arrive atomically: the USB-serial bridge hands the
