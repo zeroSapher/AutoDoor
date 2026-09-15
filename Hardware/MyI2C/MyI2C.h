@@ -8,8 +8,13 @@
   * noise rather than merely work on a bench. Compared with a minimal bit-bang
   * driver it adds three things:
   *
-  *   1. Deterministic exit state - every code path leaves SDA released and SCL
-  *      low, so the bus is never left half-driven by this master.
+  *   1. Deterministic exit state - every code path leaves BOTH lines released
+  *      high, which is the I2C idle state, so the bus is never left half-driven
+  *      by this master and MyI2C_IsIdle() means what it says. (It used to leave
+  *      SCL driven low, copied from multi-master bus parking - see the note in
+  *      MyI2C.c. Among other things that made MyI2C_IsIdle() permanently false,
+  *      which silently killed the console's I2C diagnostic and made
+  *      MyI2C_BusRecover() unable to ever report success.)
   *   2. Bus recovery - if a slave holds a line low (the classic symptom of a
   *      slave reset mid-byte, common next to motor noise), MyI2C_BusRecover()
   *      clocks up to 9 pulses plus a STOP to force every slave back to a known

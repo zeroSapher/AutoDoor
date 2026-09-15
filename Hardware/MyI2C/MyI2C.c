@@ -8,10 +8,35 @@
   * ---------------------------------------
   *   I1. On entry to any public function, the bus is either idle (SDA and SCL
   *       released) or held by this master mid-transaction.
-  *   I2. On return from any public function, SCL is driven LOW and SDA is
-  *       RELEASED. SCL low is the only safe resting state: it prevents a slave
-  *       from starting a transfer while we are not looking, and SDA released
-  *       means the master is never fighting a slave.
+  *   I2. On return from any public function, the bus is left IDLE: BOTH SCL and
+  *       SDA released high. That is what I2C defines as idle, and it is what
+  *       every slave expects between transactions.
+  *
+  *       This used to say "SCL is driven LOW and SDA is RELEASED", on the
+  *       reasoning that holding SCL low stops a slave from starting a transfer
+  *       while the master is not looking. That reasoning is a MULTI-MASTER bus
+  *       parking trick, and this system has exactly one master - there is nobody
+  *       to block. What it actually cost:
+  *
+  *         - MyI2C_IsIdle() could never be true, so the console line
+  *           "I2C idle : ..." printed NO (bus held low) on EVERY boot no matter
+  *           how the board was wired. The one diagnostic meant to distinguish
+  *           "missing pull-ups" from "device not answering" was dead.
+  *         - MyI2C_Init() ends by calling MyI2C_BusRecover(), which ends in
+  *           bus_rest() - so SCL was pulled low BEFORE main.c sampled the bus
+  *           for that very diagnostic. Measuring a state the firmware creates
+  *           and then blaming the hardware for it.
+  *         - MyI2C_BusRecover() could never report success: it ends with
+  *           bus_rest() and then returns (MyI2C_IsIdle() != 0), which was
+  *           therefore always a timeout.
+  *         - bus_start() checks "is a line low while I am not busy" to decide
+  *           whether to run a recovery. With SCL permanently low it ran three
+  *           full recovery rounds - about 30 clock edges plus delays - before
+  *           EVERY transaction, forever.
+  *
+  *       None of that is visible by reading the I2C-facing code, which is why it
+  *       survived: every transaction still "worked", and the single line that
+  *       would have revealed it was itself the casualty.
   *   I3. s_sclLevel always reflects the level the MASTER is driving on SCL.
   *       It is never inferred by reading the pin, because a slave stretching
   *       the clock makes the pin read low even while we drive high - and
@@ -112,11 +137,11 @@ static uint8_t scl_release(void)
     return MYI2C_OK;
 }
 
-/** Return the bus to the resting state required by invariant I2. */
+/** Return the bus to the I2C idle state: BOTH lines released high. */
 static void bus_rest(void)
 {
     SDA_HIGH();
-    scl_drive(0U);
+    scl_drive(1U);
     s_busBusy = 0U;
 }
 
