@@ -7,8 +7,6 @@ U5,1,AT24C32 module,Module,"4 KB I2C EEPROM, addr 0xA0"
 M1,1,130 DC motor,130,"3-6 V toy motor, needs gearing"
 Y1,1,8 MHz,HC-49S,HSE crystal
 SW1,1,Reset,SMD 3x6,Reset button
-SW2,1,KW12-3,Micro,"Open limit switch, NC contact"
-SW3,1,KW12-3,Micro,"Close limit switch, NC contact"
 SW4,1,Tactile,SMD 3x6,KEY1 start/stop
 SW5,1,Tactile,SMD 3x6,KEY2 mode
 SW6,1,Tactile,SMD 3x6,KEY3 manual open
@@ -26,10 +24,8 @@ C5,4,100nF,0805,One per MCU VDD pin
 C6,1,10uF,0805,MCU bulk
 C7,2,22pF,0805,Crystal load
 C8,1,100nF,0805,NRST
-C9,2,100nF,0805,Limit input debounce
 C10,6,100nF,0805,Button/sensor debounce
 R1,1,10k,0805,NRST pull-up
-R2,2,10k,0805,Limit pull-ups
 R3,6,10k,0805,Button/sensor pull-ups
 R4,1,1k,0805,LED series
 R5,1,1k,0805,Buzzer base
@@ -39,4 +35,3 @@ J1,1,XH2.54-2P,THT,5V power input
 J2,1,1x4 header,2.54mm,SWD: 3V3/SWDIO/SWCLK/GND
 J3,1,1x4 header,2.54mm,Console: GND/TX/RX/5V
 J4,1,1x2 header,2.54mm,Motor output
-J5,2,1x2 header,2.54mm,Limit switch inputs

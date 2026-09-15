@@ -64,14 +64,16 @@ extern "C" {
  * line the firmware prints, terminator included.
  *
  * This used to be 64, which is smaller than several lines the firmware actually
- * emits: the bench-mode "Limits : *** SIMULATED ***" line formats to 69
- * characters. vsnprintf() truncated it to 63, which cut the "\r\n" too - so the
- * next line was appended to it and the boot log showed a door-state event glued
- * onto the middle of the limit report. Nothing was lost on the wire and no ISR
- * was involved; the whole artefact was this buffer being too small. The
- * truncation handler in UART_Printf() now makes a recurrence obvious instead of
- * silent, and the worst line in the firmware (the "BOTH ASSERTED" wiring-fault
- * warning, ~71 characters) fits with room to spare.
+ * emits: the boot line that reported the position used to format to 69
+ * characters ("Limits : *** SIMULATED *** (open=0 closed=1, 2000ms travel)"; its
+ * replacement, "Position : timed estimate, ...", is shorter, but the buffer must
+ * fit whatever the longest line happens to be). vsnprintf() truncated it to 63,
+ * which cut the "\r\n" too - so the next line was appended to it and the boot log
+ * showed a door-state event glued onto the middle of that report. Nothing was lost
+ * on the wire and no ISR was involved; the whole artefact was this buffer being
+ * too small. The truncation handler in UART_Printf() now makes a recurrence
+ * obvious instead of silent, and the longest line the firmware can print (the
+ * "BOTH ASSERTED" wiring-fault warning, ~71 characters) fits with room to spare.
  */
 #define UART_PRINTF_BUFFER_SIZE 128U
 /*
@@ -171,46 +173,56 @@ extern "C" {
 #define LIMIT_DEBOUNCE_MS       25U
 
 /*===========================================================================*/
-/*  BENCH MODE: run without limit switches fitted                            */
+/*  POSITION FEEDBACK: no limit switches fitted (timed estimate)                            */
 /*===========================================================================*/
 /*
- * Default 0 = real limit switches. Override from the command line:
+ * LIMIT SWITCHES ARE NOT FITTED. This is the shipping configuration, not a bench
+ * workaround: the design was changed to derive the door position from a
+ * calibrated travel time instead of end stops, so PA0/PA1 are left unconnected
+ * and unconfigured. Build with -WithLimits to get the optional variant back.
  *
- *     .\tools\build.ps1 -NoLimits -Flash
+ * Hardware/Limit.c therefore touches no pin; it estimates the position from the
+ * motor direction and elapsed travel, reaching 100 % after DOOR_TRAVEL_MS.
+ * Everything above it - the state machine, both settle paths, the travel
+ * watchdog, the auto-close countdown, the reversal net - runs unchanged, because
+ * the point of SUBSTITUTING the feedback rather than deleting it is that the rest
+ * of the firmware cannot tell the difference.
  *
- * Set to 1, Hardware/Limit.c stops touching PA0/PA1 and instead SIMULATES the
- * door position from the motor direction and elapsed travel, finishing in
- * DOOR_SIM_TRAVEL_MS. Everything above it - the state machine, both settle paths,
- * the travel watchdog, the auto-close countdown, the reversal net - runs
- * unchanged, which is the only reason a bench test is worth anything.
+ * DELETING THE FEEDBACK WAS THE OBVIOUS READING AND IT DOES NOT WORK: if the
+ * limit reads simply reported "not at limit", the state machine would never
+ * settle and every move would end in FAULT_OPEN_TIMEOUT / FAULT_CLOSE_TIMEOUT
+ * after DOOR_TRAVEL_TIMEOUT_MS - the door would work for a few seconds and then
+ * latch a fault. An estimate is what makes a door with no end stops usable.
  *
- * DELETING THE LIMIT CODE WAS THE OBVIOUS READING AND IT DOES NOT WORK: if the
- * limit reads simply report "not at limit", the state machine never settles, and
- * every move ends in FAULT_OPEN_TIMEOUT / FAULT_CLOSE_TIMEOUT after
- * DOOR_TRAVEL_TIMEOUT_MS. The door works for five seconds and then latches a
- * fault, which tests nothing. Substituting the feedback is what makes a rig
- * without switches testable at all.
- *
- * WHAT THIS MODE REMOVES - it is not a smaller version of the real thing:
- *   - the limit EXTI handlers are unreachable, so the software fast-stop layer
- *     does not exist. The ONLY thing between a runaway motor and the mechanism
- *     is the NC contact in the +5V -> VM path, and that is hardware: it still
- *     works, but only if it is actually wired;
- *   - a shorted or broken limit line cannot be detected (Limit_IsFaulted() is
+ * WHAT IS GIVEN UP BY NOT FITTING SWITCHES - say it here, not in a footnote:
+ *   - the limit EXTI handlers are unreachable, so there is no software fast-stop
+ *     layer, and A MECHANICAL JAM IS NOT DETECTED AT ALL. The estimate advances
+ *     whenever the motor is commanded, whatever the door is actually doing, so a
+ *     blocked door reaches 100 % on schedule and the firmware declares it open.
+ *     The motor is still stopped at the calibrated time - it cannot stall for
+ *     ever - but the reported state is then a lie and nothing raises a fault;
+ *   - the travel watchdog does NOT cover that case. It only fires while the state
+ *     is still travelling, which is what happens when the DRIVE stops: then
+ *     Motor_GetDir() no longer advances the estimate and the move never
+ *     completes. It is a "the move never finished" detector, not a stall detector,
+ *     and DOOR_TRAVEL_MARGIN_MS is only the tolerance for the estimate overrunning
+ *     its calibration;
+ *   - a broken or shorted limit line cannot be detected (Limit_IsFaulted() is
  *     forced healthy);
- *   - the simulated travel time is a guess, so "arrived" and the watchdog margins
- *     are not the real ones.
- *
- * Never ship a build with this set. The boot banner, STATUS?, and
- * docs/上电调试步骤.md all say so.
+ *   - there is no absolute position reference and no correction. DOOR_TRAVEL_MS
+ *     must be calibrated to the real door and must err LONG, because reporting
+ *     arrival early stops the door short of its end stop; erring long means the
+ *     mechanism runs against that end stop for the difference;
+ *   - a door powered off mid-travel comes back believing whatever the last
+ *     commanded move implied.
  */
 #ifndef AUTODOOR_NO_LIMITS
-#define AUTODOOR_NO_LIMITS      0
+#define AUTODOOR_NO_LIMITS      1
 #endif
 
-/* End-to-end simulated travel, in milliseconds. Must stay comfortably below
-   DOOR_TRAVEL_TIMEOUT_MS or the watchdog wins the race and faults every move. */
-#define DOOR_SIM_TRAVEL_MS      2000U
+/* End-to-end travel, in milliseconds - a calibration constant for the real door,
+   not a bench convenience. Measure it, then add margin; see the notes above. */
+#define DOOR_TRAVEL_MS          2000U
 
 /*===========================================================================*/
 /*  Presence sensors simulated by keys on this branch                       */
@@ -365,10 +377,23 @@ typedef char exti_inputs_must_occupy_distinct_line_numbers[
 #define DOOR_AUTO_CLOSE_MS      5000U   /* default hold time, persisted in EEPROM */
 #define DOOR_AUTO_CLOSE_MIN_MS  1000U
 #define DOOR_AUTO_CLOSE_MAX_MS  30000U
-/* Travel watchdog: if a limit is not reached in this time the mechanism has
-   jammed or a limit switch has failed - stop and report rather than stall the
+/* Travel watchdog: if the door has not arrived in this time the mechanism has
+   jammed or the feedback has failed - stop and report rather than stall the
    motor against a hard stop indefinitely. */
+#if AUTODOOR_NO_LIMITS
+/* The timed estimate IS the arrival detector here, so the watchdog is derived
+   from it and only adds a margin: how much longer than DOOR_TRAVEL_MS a move may
+   still count as "travelling" before the firmware gives up and latches a fault.
+   It is NOT a stall allowance - a mechanically jammed door still reaches 100 % on
+   schedule and is declared arrived, so read the note above before assuming this
+   number protects the mechanism. */
+#define DOOR_TRAVEL_MARGIN_MS   1200U
+#define DOOR_TRAVEL_TIMEOUT_MS  (DOOR_TRAVEL_MS + DOOR_TRAVEL_MARGIN_MS)
+#else
+/* With switches fitted the switch is what detects arrival, so this is a generous
+   backstop that only has to catch a jam or a switch that never closes. */
 #define DOOR_TRAVEL_TIMEOUT_MS  5000U
+#endif
 /* How long the door keeps re-opening while people are still detected. */
 #define DOOR_REOPEN_EXTEND_MS   2000U
 

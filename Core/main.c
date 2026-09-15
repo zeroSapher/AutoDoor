@@ -256,18 +256,18 @@ int main(void)
     UART_SendString("========================================\r\n");
 
     /*
-     * Bench builds must be impossible to mistake for real ones. A build without
-     * limit switches has no software fast-stop layer and cannot detect a broken
-     * limit line, so it says so on every boot, before anything else.
+     * State the position feedback on every boot, before anything else. This
+     * design fits no limit switches, so the door is driven for a calibrated time
+     * and then assumed to have arrived: anyone reading this log needs to know the
+     * position is an estimate and that the travel watchdog is the only overrun
+     * protection. It is a property of the build, not a warning about it.
      */
     if (Limit_IsSimulated() != 0U)
     {
-        UART_SendString("*** BENCH BUILD: LIMIT SWITCHES DISABLED ***\r\n");
-        UART_SendString("*** position is SIMULATED from motor direction            ***\r\n");
-        UART_SendString("*** no limit EXTI, no limit fault detection              ***\r\n");
-        UART_SendString("*** the only overrun protection left is the hardware NC  ***\r\n");
-        UART_SendString("*** contact in the +5V -> VM path - IF IT IS WIRED       ***\r\n");
-        UART_SendString("*** never ship this build                                ***\r\n");
+        UART_Printf("*** NO LIMIT SWITCHES: position is a timed estimate (%ums) ***\r\n",
+                    (unsigned)DOOR_TRAVEL_MS);
+        UART_Printf("*** the travel watchdog (%ums) is the only overrun protection ***\r\n",
+                    (unsigned)DOOR_TRAVEL_TIMEOUT_MS);
         UART_SendLine();
     }
 
@@ -332,16 +332,16 @@ int main(void)
         UART_SendString("Log           : UNAVAILABLE - running with defaults\r\n");
     }
 
-    /* ---- 9. Limit levels as latched at start-up ------------------------- */
+    /* ---- 9. Position feedback as it stands at start-up ------------------- */
     if (Limit_IsSimulated() != 0U)
     {
-        UART_Printf("Limits        : *** SIMULATED *** (open=%u closed=%u, %ums travel)\r\n",
-                    (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed(),
-                    (unsigned)DOOR_SIM_TRAVEL_MS);
+        UART_Printf("Position      : timed estimate, %ums travel (open=%u closed=%u)\r\n",
+                    (unsigned)DOOR_TRAVEL_MS,
+                    (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed());
     }
     else
     {
-        UART_Printf("Limits        : open=%u closed=%u%s\r\n",
+        UART_Printf("Position      : limit switches, open=%u closed=%u%s\r\n",
                     (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed(),
                     (Limit_IsFaulted() != 0U) ? "  <-- BOTH ASSERTED (wiring fault)" : "");
     }

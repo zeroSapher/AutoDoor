@@ -1,36 +1,44 @@
 /**
   ******************************************************************************
   * @file    Limit.h
-  * @brief   Door limit switches (KW12-3 micro switches, NC contacts).
+  * @brief   Door position feedback: a timed estimate by default, or optional end
+  *          stops (NO readback on PA0/PA1) in the -WithLimits variant.
   *
-  * SAFETY ROLE
-  * -----------
-  * These are the highest-priority inputs in the system. Reaching a limit means
-  * "stop now or the mechanism breaks", which must always win over a presence
-  * sensor's "I would like the door to open".
+  * NO SWITCHES ARE FITTED - that is the default and what ships (see the block
+  * further down). What follows about protection layers describes the OPTIONAL
+  * variant, kept because the code is retained.
   *
-  * The interrupt is only the SECOND of three protection layers:
+  * SAFETY ROLE (optional variant only)
+  * ----------------------------------
+  * With switches fitted these are the highest-priority inputs in the system.
+  * Reaching a limit means "stop now or the mechanism breaks", which must always
+  * win over a presence sensor's "I would like the door to open".
   *
-  *   1. Hardware  - the switch's NC contact is wired in series in the 5 V ->
-  *                  L9110S VM motor supply path, so a limit physically removes
-  *                  motor power even if the MCU is hung. This is the only layer
-  *                  that can claim "the door cannot overrun".
+  * The interrupt is the second of what was designed as three protection layers,
+  * and only two of them exist:
+  *
+  *   1. Hardware - ABANDONED AND NOT FITTED. The plan was to wire the switch's
+  *                 NC contact in series in the 5 V -> L9110S VM path so that a
+  *                 limit removes motor power even if the MCU is hung. It
+  *                 deadlocked against the software model - the firmware requires
+  *                 the closed switch to stay held while the door is at rest -
+  *                 so it was never built (docs/接线图.md section 5 keeps that
+  *                 analysis, marked obsolete). Do not describe this door as
+  *                 having hardware overrun protection.
   *   2. Interrupt - this module: fastest possible reaction and event logging.
-  *   3. Software  - the state machine's travel timeout in Door.c.
+  *   3. Software - the state machine's travel timeout in Door.c.
   *
-  * SENSE (see Limit_Init for the full wiring note)
-  * -----------------------------------------------
-  * The switch is SPDT and BOTH contacts are used, on two electrically separate
-  * circuits: NC carries the 5 V motor supply, NO carries the readback. Readback
-  * is therefore active LOW - the NO contact closes onto GND at the limit:
+  * SENSE (optional variant)
+  * ------------------------
+  * Readback is active LOW - the NO contact closes onto GND at the limit:
   *
   *   door away from limit : pin HIGH (10k pull-up to 3V3)
   *   door AT the limit    : pin LOW  (NO contact to GND)
   *
-  * activeLevel is configured as 0 to match. A broken readback wire now reads
-  * "not at limit" rather than "at limit", so the state machine waits for the 5 s
-  * travel watchdog instead of stopping immediately - the hardware power cut still
-  * protects the mechanism, so the cost is diagnostics rather than safety.
+  * activeLevel is configured as 0 to match. A broken readback wire reads "not at
+  * limit", so the state machine waits for the travel watchdog instead of stopping
+  * immediately - and with the hardware layer abandoned there is nothing behind
+  * that but the watchdog itself.
   ******************************************************************************
   */
 
@@ -41,18 +49,19 @@
 #include <stdint.h>
 
 /*
- * BENCH MODE
- * ----------
- * With AUTODOOR_NO_LIMITS set (see Core/main.h), every function below keeps its
- * contract but reads a simulated door position instead of the pins. The API is
- * deliberately unchanged, so Door.c needs no conditional compilation at all: the
- * state machine cannot tell the difference, which is what makes the bench test
- * meaningful.
+ * NO SWITCHES FITTED (the default, and what ships)
+ * -----------------------------------------------
+ * With AUTODOOR_NO_LIMITS set - the default in Core/main.h - every function below
+ * keeps its contract but reads a TIMED position estimate instead of the pins. The
+ * API is deliberately unchanged, so Door.c needs no conditional compilation at
+ * all: the state machine cannot tell the difference, which is what makes the
+ * estimate usable.
  *
- * What changes in that mode: no pin is configured, no EXTI line is claimed,
+ * What that means: no pin is configured, no EXTI line is claimed,
  * Limit_IrqHandler() is unreachable, and Limit_IsFaulted() always reports healthy.
- * The hardware NC layer is unaffected - it does not involve the MCU - but it only
- * protects the mechanism if it is actually wired.
+ * The travel watchdog is therefore the only overrun protection, and no absolute
+ * position reference exists - see the notes in Core/main.h before changing
+ * DOOR_TRAVEL_MS.
  */
 
 /** @brief Configure both limit pins as EXTI inputs with the top priority. */
@@ -98,12 +107,12 @@ uint8_t Limit_IsClosed(void);
 
 /** @return 1 when both limits read triggered at once, which is impossible for
   *          a real mechanism and therefore indicates a wiring or sensor fault.
-  *          Always 0 in bench mode - see the note above. */
+  *          Always 0 when no switches are fitted - see the note above. */
 uint8_t Limit_IsFaulted(void);
 
-/** @return 1 when the position came from the bench-mode simulation rather than
-  *          from real switches. Used by the boot banner and STATUS? so an
-  *          unsafe build cannot be mistaken for a normal one. */
+/** @return 1 when the position comes from the timed estimate rather than from
+  *          real switches. Used by the boot banner and STATUS? because it is
+  *          what tells a reader how much a timeout fault is worth. */
 uint8_t Limit_IsSimulated(void);
 
 #endif /* __LIMIT_H */

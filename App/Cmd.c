@@ -131,12 +131,13 @@ void Cmd_ReportStatus(void)
         UART_Printf(" DROPPED=%u", (unsigned)Log_DroppedCount());
     }
 
-    /* Same reasoning, and more important: a bench build with simulated limits
-       must never be mistaken for a normal one, so it is labelled in every status
-       line rather than only once at boot. */
+    /* Same reasoning: the position source is a property of the build that an
+       unattended log has to carry, because a status line may be the only thing
+       anyone looks at and "where did the door's position come from" changes what
+       a fault means. */
     if (Limit_IsSimulated() != 0U)
     {
-        UART_SendString(" LIMITS=SIMULATED");
+        UART_SendString(" LIMITS=TIMED");
     }
     UART_Printf(" LIM=%u/%u", (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed());
     UART_Printf(" I2C=%s", (MyI2C_IsIdle() != 0U) ? "ok" : "STUCK");

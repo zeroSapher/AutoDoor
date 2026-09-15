@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Hardware-in-the-loop chain test for the AutoDoor bench firmware.
+    Hardware-in-the-loop chain test for the AutoDoor firmware.
 
 .DESCRIPTION
     Drives the whole door chain without touching the hardware: key presses and
@@ -50,9 +50,9 @@
     powershell -File tools\bench-chain.ps1 -Port COM7
 
 .NOTES
-    Requires the BENCH build (built with tools\build.ps1 -NoLimits): the chain
-    relies on the limits being simulated from the motor direction. The script
-    checks this and refuses to run otherwise.
+    Requires the default build (no limit switches fitted, so the door arrives on a
+    calibrated travel time): the chain relies on the door reaching its end by time.
+    The script checks this and refuses to run otherwise.
 #>
 
 [CmdletBinding()]
@@ -85,7 +85,7 @@ if (-not $Gdb) {
 if (-not $OpenOcd) {
     $OpenOcd = Find-Tool @('D:\ST\openocd\bin\openocd.exe') 'openocd'
 }
-if (-not (Test-Path $Elf)) { throw "ELF not found: $Elf (build it with tools\build.ps1 -NoLimits)" }
+if (-not (Test-Path $Elf)) { throw "ELF not found: $Elf (build it with tools\build.ps1)" }
 
 # Forward slashes for anything handed to GDB: its command parser treats a
 # backslash as an escape, so "file D:\code\..." arrives as "D:code..." and the
@@ -360,8 +360,8 @@ try {
     if (-not $st) { throw "no reply from $Port - is the firmware running and the console wired?" }
     Write-Host ''
     Write-Host "precondition: $(Get-State) LIMITS=$($st['LIMITS'])"
-    if ($st['LIMITS'] -ne 'SIMULATED') {
-        throw "this chain needs the BENCH build (LIMITS=SIMULATED). Flash tools\build.ps1 -NoLimits first."
+    if ($st['LIMITS'] -ne 'TIMED') {
+        throw "this chain needs the default build (LIMITS=TIMED). Build with tools\build.ps1 (use -WithLimits only if you actually fitted limit switches)."
     }
 
     # Speed the chain up: 1 s auto-close instead of 5 s. Not persisted (no EEPROM).

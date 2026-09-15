@@ -25,12 +25,6 @@ KEY4
 LED_STATUS
     PB4    STATUS_LED       Status LED (state blink)     [both]
 
-LIMIT_CLOSE
-    PA1    LIMIT_CLOSE      Close limit input            [both]
-
-LIMIT_OPEN
-    PA0    LIMIT_OPEN       Open limit input             [both]
-
 MOTOR_IA
     PA4    MOTOR_IA         L9110S IA                    [both]
 

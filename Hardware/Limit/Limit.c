@@ -1,17 +1,17 @@
 /**
   ******************************************************************************
   * @file    Limit.c
-  * @brief   Door limit switches, with an optional bench-test simulation.
+  * @brief   Door position feedback: no switches fitted (timed estimate) by
+  *          default, with the optional end-stop variant behind a switch.
   *
   * TWO MODES, CHOSEN AT COMPILE TIME
   * ---------------------------------
-  *   AUTODOOR_NO_LIMITS == 0 (default) - the real thing: NO-contact readback on
-  *       PA0/PA1 with debounce, EXTI edges, and the hardware NC power cut as the
-  *       outer layer.
+  *   AUTODOOR_NO_LIMITS == 1 (DEFAULT - this is what ships) - no end stops are
+  *       fitted, so the position is estimated from the motor direction and
+  *       elapsed travel. Nothing here touches a pin.
   *
-  *   AUTODOOR_NO_LIMITS == 1 - the limit wiring is absent, so position is
-  *       SIMULATED from the motor direction and elapsed travel. Nothing here
-  *       touches a pin.
+  *   AUTODOOR_NO_LIMITS == 0 (build with -WithLimits) - the optional variant: NO
+  *       contact readback on PA0/PA1 with debounce and EXTI edges.
   *
   * WHY A SIMULATION AND NOT A DELETION
   * -----------------------------------
@@ -26,7 +26,7 @@
   * position that advances while the motor runs and latches at 0 % and 100 %. The
   * whole state machine - both settle paths, the travel watchdog, the auto-close
   * countdown, the reversal net - then runs exactly as it will on the real door,
-  * which is the point of a bench test.
+  * which is the whole reason the feedback is substituted rather than deleted.
   *
   * WHAT IS LOST (say it here, not in a footnote)
   * ---------------------------------------------
@@ -36,11 +36,13 @@
   *     but only if it is wired.
   *   - Limit_IsFaulted() always reports healthy, so a shorted limit line cannot
   *     be detected.
-  *   - The simulated travel time is a guess. If the real door is slower, this
-  *     mode will report arrival early and the watchdog timing will look wrong.
+  *   - The travel time is a calibration constant, not a measurement. Report
+  *     arrival early and the door stops short of its end stop; err long and the
+  *     mechanism runs against that end stop for the difference.
   *
-  * This mode is for a bench with no switches fitted. It must not be built into
-  * anything that drives a real door. The boot banner and STATUS? both say so.
+  * This is the SHIPPING configuration, so the estimate is what the door runs on:
+  * the boot banner and every STATUS? line carry it, because "the position is an
+  * estimate" is what tells a reader how much a timeout fault is worth.
   ******************************************************************************
   */
 
@@ -66,8 +68,8 @@ static uint16_t s_simAccum  = 0U;
 static uint8_t  s_simOpenEvent  = 0U;
 static uint8_t  s_simCloseEvent = 0U;
 
-/* 1 % of travel per this many milliseconds => DOOR_SIM_TRAVEL_MS end to end. */
-#define SIM_MS_PER_PERCENT      (DOOR_SIM_TRAVEL_MS / 100U)
+/* 1 % of travel per this many milliseconds => DOOR_TRAVEL_MS end to end. */
+#define SIM_MS_PER_PERCENT      (DOOR_TRAVEL_MS / 100U)
 
 #else
 
@@ -85,7 +87,7 @@ void Limit_Init(void)
 #if AUTODOOR_NO_LIMITS
     /*
      * No pin, no clock, no EXTI. The virtual door starts CLOSED, which is what a
-     * bench rig with the motor at rest looks like, and is the same assumption the
+     * rig with the motor at rest looks like, and is the same assumption the
      * state machine makes when the real close limit is held down.
      */
     s_simPos        = 0U;
@@ -333,7 +335,7 @@ uint8_t Limit_IsFaulted(void)
      * The simulated position is one-dimensional, so it can never report both
      * ends at once. That does not mean the check is unnecessary in this mode - it
      * means the fault it detects is undetectable without real switches, which is
-     * one of the costs of bench-testing without them.
+     * one of the costs of running without them.
      */
     return 0U;
 #else

@@ -77,8 +77,8 @@ NET_TABLE = [
     ("UART_RX",           "USART1_RX",      "Console RX",         BOTH),
     ("MYI2C_SCL",        "I2C_SCL",        "OLED/EEPROM I2C clock", BOTH),
     ("MYI2C_SDA",        "I2C_SDA",        "OLED/EEPROM I2C data",  BOTH),
-    ("LIMIT_OPEN",        "LIMIT_OPEN",     "Open limit input",   BOTH),
-    ("LIMIT_CLOSE",       "LIMIT_CLOSE",    "Close limit input",  BOTH),
+    # LIMIT_OPEN / LIMIT_CLOSE are deliberately NOT here: no end stops are fitted.
+    # See RESERVED_PINS below for the pin-level story.
     ("SENSOR_OUT",        "SENSOR_OUT",     "Outside presence",   BOTH),
     ("SENSOR_IN",         "SENSOR_IN",      "Inside presence",    BOTH),
     ("KEY1",              "KEY1",           "Start / stop",       BOTH),
@@ -113,6 +113,18 @@ NET_TABLE = [
 RESERVED_PINS = [
     ("LED", "PC13",
      "Duplicate/unused LED macros - no firmware code references them"),
+    # No end stops are fitted: the design derives the door position from a
+    # calibrated travel time (AUTODOOR_NO_LIMITS=1 by default), so PA0/PA1 are
+    # unconnected and free for other use. The history is worth keeping because it
+    # is why they are free: these two lines each carried BOTH a limit switch and a
+    # presence sensor until round 11, and AFIO routes one port per EXTI line, so
+    # the sensor - initialised second - took both lines and the limit switches were
+    # left with no interrupt at all. The sensors moved to PB12/PB13 (lines 12/13).
+    # A line is not shareable, it is contended, and one side always loses.
+    ("LIMIT_OPEN", "PA0",
+     "No end stops fitted (timed position) - pin unconnected and free"),
+    ("LIMIT_CLOSE", "PA1",
+     "No end stops fitted (timed position) - pin unconnected and free"),
 ]
 
 # Pins that are not driven by the application but must be present for the part to
@@ -120,14 +132,6 @@ RESERVED_PINS = [
 FIXED_PINS = [
     ("PA13", "SWDIO",     "Debug data - must stay free"),
     ("PA14", "SWCLK",     "Debug clock - must stay free"),
-    # These two lines carried BOTH a limit switch and a sensor until round 11.
-    # AFIO routes one port per line, so the sensor - initialised second - took
-    # both lines and the limit switches were left with no interrupt at all. The
-    # sensors moved to PB12/PB13 (lines 12/13). This table used to call the
-    # arrangement "shared", which was the wrong model: a line is not shareable,
-    # it is contended, and one side always loses.
-    ("PA0",  "EXTI0",     "limit open only - sensors are on EXTI12/13"),
-    ("PA1",  "EXTI1",     "limit close only - sensors are on EXTI12/13"),
     ("PD0",  "OSC_IN",    "8 MHz crystal"),
     ("PD1",  "OSC_OUT",   "8 MHz crystal"),
     ("NRST", "NRST",      "Reset, 10k pull-up + 100nF"),
@@ -147,8 +151,9 @@ BOM = [
     ("M1",  1, "130 DC motor",     "130",      "3-6 V toy motor, needs gearing"),
     ("Y1",  1, "8 MHz",            "HC-49S",   "HSE crystal"),
     ("SW1", 1, "Reset",            "SMD 3x6",  "Reset button"),
-    ("SW2", 1, "KW12-3",           "Micro",    "Open limit switch, NC contact"),
-    ("SW3", 1, "KW12-3",           "Micro",    "Close limit switch, NC contact"),
+    # No SW2/SW3: the two KW12-3 end stops are NOT fitted (timed position instead).
+    # The RefDes numbers are deliberately left with the gap so they keep matching
+    # the schematic notes and docs, which refer to SW4..SW9 by name.
     ("SW4", 1, "Tactile",          "SMD 3x6",  "KEY1 start/stop"),
     ("SW5", 1, "Tactile",          "SMD 3x6",  "KEY2 mode"),
     ("SW6", 1, "Tactile",          "SMD 3x6",  "KEY3 manual open"),
@@ -166,10 +171,12 @@ BOM = [
     ("C6",  1, "10uF",             "0805",     "MCU bulk"),
     ("C7",  2, "22pF",             "0805",     "Crystal load"),
     ("C8",  1, "100nF",            "0805",     "NRST"),
-    ("C9",  2, "100nF",            "0805",     "Limit input debounce"),
+    # C9 (limit debounce) is gone with the end stops.
     ("C10", 6, "100nF",            "0805",     "Button/sensor debounce"),
     ("R1",  1, "10k",              "0805",     "NRST pull-up"),
-    ("R2",  2, "10k",              "0805",     "Limit pull-ups"),
+    # R2 (limit pull-ups) is gone with the end stops.
+    # Fitting end stops later means: 2x KW12-3, 2x 10k pull-up, 2x 100nF debounce,
+    # plus a firmware rebuild with -WithLimits (see Core/main.h).
     ("R3",  6, "10k",              "0805",     "Button/sensor pull-ups"),
     ("R4",  1, "1k",               "0805",     "LED series"),
     ("R5",  1, "1k",               "0805",     "Buzzer base"),
@@ -179,7 +186,8 @@ BOM = [
     ("J2",  1, "1x4 header",       "2.54mm",   "SWD: 3V3/SWDIO/SWCLK/GND"),
     ("J3",  1, "1x4 header",       "2.54mm",   "Console: GND/TX/RX/5V"),
     ("J4",  1, "1x2 header",       "2.54mm",   "Motor output"),
-    ("J5",  2, "1x2 header",       "2.54mm",   "Limit switch inputs"),
+    # No J5: the limit switch input header is not fitted either. Fitting end stops
+    # later needs this header back as well, on top of the parts listed at C9/R2.
 ]
 
 

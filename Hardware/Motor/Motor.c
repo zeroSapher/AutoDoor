@@ -296,9 +296,35 @@ void Motor_Tick1ms(void)
     }
 
     /* ---- 2. Software PWM carrier ----------------------------------------- */
+    if (s_dir == MOTOR_DIR_BRAKE)
+    {
+        /* Braking is a DRIVEN state (both low sides on), so it is re-asserted
+           rather than released. */
+        apply_output(MOTOR_DIR_BRAKE, 1U);
+        s_phase = 0U;
+        return;
+    }
+
     if ((s_dir != MOTOR_DIR_OPEN) && (s_dir != MOTOR_DIR_CLOSE))
     {
-        /* Idle or braking: nothing to modulate. */
+        /*
+         * Idle: re-release the bridge on every tick instead of assuming the pins
+         * are already low.
+         *
+         * apply_output() and outputs_release() each write IA and IB with two
+         * separate stores, and this tick runs in the SysTick interrupt, so it can
+         * land BETWEEN those two writes when the main loop is stopping the motor.
+         * The half-written result - one side driven - would then stay on the
+         * bridge forever: once s_dir is STOP, nothing else ever writes these
+         * pins. A motor left energised after an emergency stop would simply keep
+         * running, and the travel watchdog cannot catch it because the state is
+         * no longer "travelling". That was reproduced on hardware: the bridge was
+         * driven by hand, s_dir was set to STOP, and a full second of ticks left
+         * the outputs exactly as they were.
+         *
+         * Two GPIO writes per millisecond make the stopped state self-healing.
+         */
+        outputs_release();
         s_phase = 0U;
         return;
     }

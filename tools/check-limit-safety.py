@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """Check the two invariants that the limit/motor-cut path depends on.
 
+SCOPE - READ THIS FIRST
+-----------------------
+This guard covers the OPTIONAL variant built with `tools\\build.ps1 -WithLimits`
+(`-DAUTODOOR_NO_LIMITS=0`). The shipping default fits NO limit switches:
+`AUTODOOR_NO_LIMITS` is 1 by default, `Hardware/Limit.c` touches no pin, position
+is a timed estimate from DOOR_TRAVEL_MS, and the whole EXTI/fast-stop path below
+is not compiled in.
+
+So a PASS here does not say anything about the shipping firmware - that code is
+not part of the default build. The limits below still matter because they are the
+only guard on the path that reappears the moment someone fits end stops and
+builds with -WithLimits, and that path has already been broken twice.
+
 WHY THIS EXISTS
 ---------------
 This path has now been broken twice by REMOVING A GUARD that looked redundant:
@@ -15,7 +28,8 @@ This path has now been broken twice by REMOVING A GUARD that looked redundant:
      edge. Deleting it made every RELEASE edge cut the motor, which stranded the
      door a few millimetres off the switch - nothing restarts the motor except
      begin_open/begin_close - and the travel watchdog faulted it five seconds
-     later. The default build could not open or close the door at all.
+     later. The build that was default AT THE TIME (limit switches fitted) could
+     not open or close the door at all.
 
 Neither break produced a compiler warning, and both would have been invisible to
 every other check in tools/. A comment saying "do not remove this" had already
@@ -25,6 +39,9 @@ This is a TEXTUAL check on the source, not a proof about the program. It asserts
 that the two guards are still present and that the decision has not moved back
 into the interrupt handler. It cannot tell whether the guards are CORRECT - only
 that someone did not quietly delete them. Say so rather than implying more.
+
+The source it reads is compiled only when -WithLimits is passed, so the check
+keeps working either way: it reads text, not a build.
 
 Run:  python tools/check-limit-safety.py
 Exit: 0 = invariants present, 1 = one is missing or the parser went blind
@@ -125,12 +142,13 @@ else:
     if "Motor_EmergencyStop" not in code:
         problems.append(
             "Limit_IrqHandler() no longer calls Motor_EmergencyStop() at all - the "
-            "fast-stop layer the design depends on is gone.")
+            "fast-stop layer the -WithLimits variant depends on is gone.")
 
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
-print("limit/motor-cut invariants:")
+print("limit/motor-cut invariants (-WithLimits variant only; the shipping "
+      "default fits no limit switches):")
 print("  EXTI0/EXTI1 handlers  : delegate to Limit_IrqHandler, no direct cut")
 print("  Limit_IrqHandler      : pin-level guard (Bit_RESET) + direction guard")
 print("  (textual presence check only - it cannot tell whether the guards are right)")
