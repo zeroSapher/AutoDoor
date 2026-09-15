@@ -567,16 +567,18 @@ uint8_t Display_HandleKey(uint8_t isOpenKey, uint8_t isLongPress)
     if (isLongPress != 0U)
     {
         /*
-         * A long press is never a door command - the door is driven by short
-         * presses only - so it can always act as the "get me out of here"
-         * gesture. It used to be gated behind the same browsing condition as a
-         * short press, which made it a silent no-op in AUTO mode or whenever the
-         * system was enabled: the caller discards a 0 return, so the gesture the
-         * wiring guide documents simply did nothing and the only way off the log
-         * screen was KEY2's screen cycle. Returning 0 here means only that there
-         * was nothing to leave.
+         * "Back to the live status screen" - from ANY screen that is not it.
+         *
+         * A long press is never a door command (the door is driven by short
+         * presses only), so it can always act as the way home. This first
+         * required the log browser specifically, which made the gesture dead on
+         * the EVENT screen - the one that looks most like a log view, and the
+         * only one that shows anything at all when there is no EEPROM to browse.
+         * A key that appears to do nothing reads as a broken key, and this one
+         * was reported as exactly that. Returning 0 now means only "already
+         * home".
          */
-        if (s_screen != DISP_SCREEN_LOG)
+        if (s_screen == DISP_SCREEN_STATUS)
         {
             return 0U;
         }

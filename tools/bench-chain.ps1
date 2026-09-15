@@ -252,6 +252,54 @@ function Step {
     if (-not $ok) { Write-Host ("      expected {0}" -f $what) }
 }
 
+<#
+  Assert on an internal variable instead of on serial output.
+
+  Screen navigation prints nothing at all, so the only way to test it is to read
+  the firmware's own state back over SWD. Reading halts the target, so it happens
+  after a short pause - the main loop has to have consumed the injected event
+  first, and it does that within microseconds of the resume.
+#>
+function Step-Var {
+    param(
+        [string]$Name,
+        [scriptblock]$Action,
+        [string]$Expr,
+        [string]$ExpectRegex
+    )
+
+    $script:stepNo++
+    [void](Read-New)
+    & $Action
+
+    # Poll instead of sleeping a fixed amount and reading once. The main loop can
+    # be inside a 1 KB I2C panel flush (~90 ms) when the event lands, so a single
+    # read a quarter of a second later caught the screen still unchanged - the
+    # value had moved on by the next step's read. That is a flaky assertion, not a
+    # firmware defect, and a fixed sleep would only move the flakiness around.
+    $deadline = (Get-Date).AddMilliseconds(2000)
+    $out = ''
+    do {
+        Start-Sleep -Milliseconds 200
+        $out = Invoke-Gdb @("print $Expr")
+        $ok  = [regex]::IsMatch($out, $ExpectRegex)
+    } while ((-not $ok) -and ((Get-Date) -lt $deadline))
+
+    # GDB also echoes the function it halted in, so take the LAST "$N = value".
+    $shown = $out.Trim()
+    $m = [regex]::Matches($out, '\$\d+\s*=\s*([^\r\n]+)')
+    if ($m.Count -gt 0) { $shown = $m[$m.Count - 1].Groups[1].Value.Trim() }
+
+    $script:results += [pscustomobject]@{
+        No = $script:stepNo; Name = $Name; Pass = [bool]$ok
+        Expect = "$Expr ~ /$ExpectRegex/"; Reply = $shown; Status = ''
+    }
+
+    $tag = if ($ok) { 'PASS' } else { 'FAIL' }
+    Write-Host ("[{0}] {1,-46} {2}" -f $tag, $Name, $shown)
+    if (-not $ok) { Write-Host ("      expected {0} ~ /{1}/" -f $Expr, $ExpectRegex) }
+}
+
 # ---------------------------------------------------------------------------
 # Set-up
 # ---------------------------------------------------------------------------
@@ -496,6 +544,35 @@ try {
     Step 'and the door is unresponsive again' {
         Inject-Sensor 'outside' 'arrive'
     } -NotExpect 'OPEN_START' -QuietMs 2000
+
+    # -----------------------------------------------------------------------
+    Write-Host ''
+    Write-Host '--- F. screen navigation: a long press must always get you home ---'
+    # -----------------------------------------------------------------------
+
+    # There are three screens and KEY2 long press cycles STATUS -> EVENT -> LOG.
+    # The event screen ("Recent events") is the one that looks like a log view,
+    # and with no EEPROM it is the only one that shows anything - the log browser
+    # just says "(no records)". Long pressing KEY3 on it used to do nothing, which
+    # is exactly how it was reported. None of this reaches the console, so the
+    # screen is read back over SWD.
+    Step-Var 'KEY2 long -> event screen' { Inject-Key $KEY_MODE 'long' } `
+             -Expr "'Display.c'::s_screen" -ExpectRegex 'DISP_SCREEN_EVENT'
+
+    Step-Var 'KEY3 long leaves the EVENT screen' { Inject-Key $KEY_OPEN 'long' } `
+             -Expr "'Display.c'::s_screen" -ExpectRegex 'DISP_SCREEN_STATUS'
+
+    Step-Var 'KEY2 long -> event screen again' { Inject-Key $KEY_MODE 'long' } `
+             -Expr "'Display.c'::s_screen" -ExpectRegex 'DISP_SCREEN_EVENT'
+
+    Step-Var 'KEY2 long -> log screen' { Inject-Key $KEY_MODE 'long' } `
+             -Expr "'Display.c'::s_screen" -ExpectRegex 'DISP_SCREEN_LOG'
+
+    Step-Var 'KEY3 long leaves the LOG screen' { Inject-Key $KEY_OPEN 'long' } `
+             -Expr "'Display.c'::s_screen" -ExpectRegex 'DISP_SCREEN_STATUS'
+
+    Step-Var 'KEY3 long on the status screen is a harmless no-op' { Inject-Key $KEY_OPEN 'long' } `
+             -Expr "'Display.c'::s_screen" -ExpectRegex 'DISP_SCREEN_STATUS'
 } catch {
     # Remembered, not rethrown here: exit inside a finally block terminates the
     # script and would swallow the reason. It is reported after the summary.

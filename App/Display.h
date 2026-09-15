@@ -101,9 +101,9 @@ void Display_LogScroll(uint8_t dir);
   *         controller - silently swallowing a manual-open command because a menu
   *         is open would be a genuine operational bug.
   * @note   A LONG press is not a door command at all (the door uses short presses
-  *         only), so it always leaves the log screen, in any mode and whether or
-  *         not the system is enabled. A 0 return then means "there was nothing to
-  *         leave", i.e. the log screen was not open.
+  *         only), so it always returns to the live status screen - from the event
+  *         screen and the log browser alike, in any mode and whether or not the
+  *         system is enabled. A 0 return then means "already there".
   */
 uint8_t Display_HandleKey(uint8_t isOpenKey, uint8_t isLongPress);
 
