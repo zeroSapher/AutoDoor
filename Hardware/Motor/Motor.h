@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    Motor.h
-  * @brief   L9110S dual H-bridge driver: direction, speed ramp, software PWM.
+  * @brief   TB6612FNG driver: direction, speed ramp, software PWM, standby.
   ******************************************************************************
   */
 

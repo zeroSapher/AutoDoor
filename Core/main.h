@@ -335,35 +335,46 @@ typedef char exti_inputs_must_occupy_distinct_line_numbers[
 #define STATUS_LED_PIN          GPIO_Pin_4
 
 /*===========================================================================*/
-/*  Motor - L9110S dual H-bridge                                             */
+/*  Motor - TB6612FNG dual H-bridge                                          */
 /*===========================================================================*/
 /*
- * The L9110S has no enable pin: direction and speed are both encoded on the two
- * input pins, so PWM has to be applied to IA/IB themselves.
+ * TB6612FNG, channel A. The direction is set by two STATIC logic inputs and the
+ * speed is a SEPARATE PWM input - the opposite arrangement to the L9110S this
+ * firmware used to drive, and the whole reason this block changed:
  *
- *   IA  IB   result
- *    0   0   stop    - both low-side drivers off, motor coasts
- *    0   1   forward
- *    1   0   reverse
- *    1   1   brake   - both low-side drivers on, motor is shorted
+ *   AIN1 AIN2 PWMA   result
+ *     0    0    x    stop    - outputs off, motor coasts
+ *     0    1    1    reverse
+ *     1    0    1    forward
+ *     1    1    1    brake   - outputs shorted, the motor resists turning
+ *     x    x    0    not driven. The TB6612 pulls both outputs low during the low
+ *                    half of every carrier cycle, i.e. it brakes rather than
+ *                    coasts there. That is normal for this part and does not
+ *                    change how the door moves at a 100 Hz carrier.
  *
- * Because PWM drives the direction pins, a direction change MUST be separated by
- * a dead time with IA=IB=0. Otherwise the bridge can be asked to reverse while
- * current is still flowing, and the resulting transient is the classic way to
- * destroy an H-bridge.
+ * STBY must be HIGH for the channel to work at all, so it doubles as a hard
+ * disable: Motor_EmergencyStop() drops it. That is a SECOND MCU-controlled way to
+ * de-energise the bridge which the L9110S could not offer - but it is still just
+ * the MCU driving a pin, so it is NOT an independent safety layer and not a
+ * substitute for the mechanical cut that was abandoned (docs/接线图.md section 5).
  *
- * Software PWM is used (see App/timer notes) at 1 kHz: a 20 kHz software PWM
- * would need an interrupt every 20 us, which is 1440 CPU cycles at 72 MHz -
- * not enough headroom at 72 MHz once the state machine is also running. 1 kHz
- * is far above any mechanical time constant of a model door.
+ * PWMA is on PB0 because PB0 is TIM3_CH3: moving this carrier to hardware PWM
+ * later becomes a pin-function change instead of a rewire.
  */
-#define MOTOR_RCC               RCC_APB2Periph_GPIOA
-#define MOTOR_IA_PORT           GPIOA
-#define MOTOR_IA_PIN            GPIO_Pin_4
-#define MOTOR_IB_PORT           GPIOA
-#define MOTOR_IB_PIN            GPIO_Pin_5
+#define MOTOR_RCC               (RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB)
+#define MOTOR_AIN1_PORT         GPIOA
+#define MOTOR_AIN1_PIN          GPIO_Pin_4
+#define MOTOR_AIN2_PORT         GPIOA
+#define MOTOR_AIN2_PIN          GPIO_Pin_5
+#define MOTOR_PWM_PORT          GPIOB
+#define MOTOR_PWM_PIN           GPIO_Pin_0     /* TIM3_CH3 */
+#define MOTOR_STBY_PORT         GPIOB
+#define MOTOR_STBY_PIN          GPIO_Pin_1
 
-#define MOTOR_PWM_FREQ_HZ       1000U   /* software PWM carrier */
+/* Documentation only - the real carrier is PWM_PHASE_MAX / PWM_STEP_PER_TICK in
+   Hardware/Motor/Motor.c (100 steps per 10 ms = 100 Hz). This macro used to claim
+   1000 and nothing referenced it, which is how it drifted out of date. */
+#define MOTOR_PWM_FREQ_HZ       100U
 #define MOTOR_PWM_LEVELS        100U    /* duty resolution: 1 % steps */
 #define MOTOR_DEADTIME_MS       20U     /* IA=IB=0 guard on every reversal */
 #define MOTOR_RAMP_UP_MS        400U    /* 0 -> target duty, avoids inrush */

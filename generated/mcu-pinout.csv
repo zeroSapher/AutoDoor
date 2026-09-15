@@ -3,12 +3,14 @@ BOOT0,BOOT0,-,10k pull-down to GND,both
 NRST,NRST,-,"Reset, 10k pull-up + 100nF",both
 PA0,(reserved),LIMIT_OPEN,No end stops fitted (timed position) - pin unconnected and free,unused
 PA1,(reserved),LIMIT_CLOSE,No end stops fitted (timed position) - pin unconnected and free,unused
-PA4,MOTOR_IA,MOTOR_IA,L9110S IA,both
-PA5,MOTOR_IB,MOTOR_IB,L9110S IB,both
+PA4,MOTOR_AIN1,MOTOR_AIN1,TB6612 AIN1 (direction),both
+PA5,MOTOR_AIN2,MOTOR_AIN2,TB6612 AIN2 (direction),both
 PA9,USART1_TX,UART_TX,Console TX,both
 PA10,USART1_RX,UART_RX,Console RX,both
 PA13,SWDIO,-,Debug data - must stay free,both
 PA14,SWCLK,-,Debug clock - must stay free,both
+PB0,MOTOR_PWMA,MOTOR_PWM,"TB6612 PWMA (speed, PB0 = TIM3_CH3)",both
+PB1,MOTOR_STBY,MOTOR_STBY,"TB6612 STBY (enable, active high)",both
 PB3,BUZZER,BUZZER,Buzzer drive,both
 PB4,LED_STATUS,STATUS_LED,Status LED (state blink),both
 PB5,KEY1,KEY1,Start / stop,both

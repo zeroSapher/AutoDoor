@@ -126,8 +126,8 @@ static void begin_open(void)
     s_travelStartMs = g_msTick;
 
     Motor_Run(MOTOR_DIR_OPEN);
-    /* The L9110S has no separate enable pin, so the ramp in Motor.c is doing the
-       soft start; the duty is the normal travel speed. */
+    /* Speed goes on the driver's PWM input; the ramp in Motor.c is what does the
+       soft start, so the duty here is the normal travel speed. */
     Motor_SetDuty(s_travelDuty);
 
     set_state(DOOR_STATE_OPENING);

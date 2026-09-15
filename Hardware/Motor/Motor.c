@@ -1,29 +1,35 @@
 /**
   ******************************************************************************
   * @file    Motor.c
-  * @brief   L9110S dual H-bridge driver: direction, speed ramp, software PWM.
+  * @brief   TB6612FNG driver: direction, speed ramp, software PWM, standby.
+  *
+  * PIN ARRANGEMENT
+  * ---------------
+  * The TB6612 takes the direction on two static inputs and the speed on a
+  * separate PWM input, so unlike the L9110S this firmware used to drive, the
+  * carrier never touches a direction pin. Reversing therefore cannot chatter the
+  * direction inputs, and the dead time below only has to let the current decay.
   *
   * SOFTWARE PWM
   * ------------
-  * The L9110S has no enable pin, so speed has to be modulated on IA/IB. A
-  * 20 kHz carrier - the frequency that would keep the motor electrically quiet -
+  * A 20 kHz carrier - the frequency that would keep the motor electrically quiet -
   * is not reachable in software: at 72 MHz an interrupt every 20 us leaves only
   * 1440 cycles, far too little once the door state machine shares the CPU.
   *
-  * Instead the carrier runs slowly and cheaply: the 1 ms SysTick handler
-  * advances a phase accumulator and drives IA/IB from it, giving a 100 Hz
-  * carrier with 1 % duty resolution (see the PWM geometry note below). One
-  * interrupt per millisecond costs a few dozen cycles, and 100 Hz is orders of
-  * magnitude faster than any mechanical time constant of a model door, so the
-  * motion is smooth. There is a faint audible hum from the motor; if that ever
-  * becomes objectionable the fix is to move PWM onto TIM3 (see main.h) without
-  * changing this API.
+  * Instead the carrier runs slowly and cheaply: the 1 ms SysTick handler advances
+  * a phase accumulator and drives PWMA from it, giving a 100 Hz carrier with 1 %
+  * duty resolution (see the PWM geometry note below). One interrupt per
+  * millisecond costs a few dozen cycles, and 100 Hz is orders of magnitude faster
+  * than any mechanical time constant of a model door, so the motion is smooth.
+  * There is a faint audible hum from the motor; if that ever becomes
+  * objectionable the fix is to move PWMA onto TIM3_CH3 (it is already on PB0 for
+  * exactly that reason) without changing this API.
   *
   * DEAD TIME
   * ---------
   * Reversing an H-bridge while current is still flowing is the classic way to
-  * destroy it. Motor_Run() therefore always inserts MOTOR_DEADTIME_MS with
-  * IA=IB=0 before applying a new direction.
+  * destroy it. Motor_Run() therefore always inserts MOTOR_DEADTIME_MS with the
+  * outputs released before applying a new direction.
   ******************************************************************************
   */
 
@@ -35,10 +41,33 @@
 /*  Pin macros                                                               */
 /*===========================================================================*/
 
-#define IA_HIGH()       GPIO_SetBits(MOTOR_IA_PORT, MOTOR_IA_PIN)
-#define IA_LOW()        GPIO_ResetBits(MOTOR_IA_PORT, MOTOR_IA_PIN)
-#define IB_HIGH()       GPIO_SetBits(MOTOR_IB_PORT, MOTOR_IB_PIN)
-#define IB_LOW()        GPIO_ResetBits(MOTOR_IB_PORT, MOTOR_IB_PIN)
+#define PWM_HIGH()      GPIO_SetBits(MOTOR_PWM_PORT, MOTOR_PWM_PIN)
+#define PWM_LOW()       GPIO_ResetBits(MOTOR_PWM_PORT, MOTOR_PWM_PIN)
+#define STBY_HIGH()     GPIO_SetBits(MOTOR_STBY_PORT, MOTOR_STBY_PIN)
+#define STBY_LOW()      GPIO_ResetBits(MOTOR_STBY_PORT, MOTOR_STBY_PIN)
+
+/**
+  * @brief  Write both direction inputs in ONE store.
+  *
+  * They live on the same port, so BSRR can change both atomically. Writing them
+  * one after the other is what let a pin check catch the intermediate
+  * combination: turning from CLOSE (AIN1=0, AIN2=1) to OPEN sets AIN1 first, so
+  * for the few nanoseconds between the two stores the bridge sees 1/1 - the brake
+  * state. Brake is legal and the glitch is far too short to matter mechanically,
+  * but the whole point of this part is that the direction inputs are STATIC for a
+  * move, and one store is what makes that actually true.
+  */
+static void write_direction(uint8_t ain1High, uint8_t ain2High)
+{
+    uint32_t bsrr;
+
+    bsrr  = (ain1High != 0U) ? (uint32_t)MOTOR_AIN1_PIN
+                             : ((uint32_t)MOTOR_AIN1_PIN << 16U);
+    bsrr |= (ain2High != 0U) ? (uint32_t)MOTOR_AIN2_PIN
+                             : ((uint32_t)MOTOR_AIN2_PIN << 16U);
+
+    MOTOR_AIN1_PORT->BSRR = bsrr;
+}
 
 /*
  * Software PWM geometry.
@@ -93,43 +122,48 @@ static uint8_t             s_initialised = 0U;
   */
 static void apply_output(MotorDir_t dir, uint8_t output)
 {
-    if (output == 0U)
-    {
-        IA_LOW();
-        IB_LOW();
-        return;
-    }
-
+    /*
+     * The direction pins are written on every call, including during the low half
+     * of the carrier cycle. They are static for the whole move, so this costs
+     * nothing and leaves them defined instead of depending on what the previous
+     * call happened to leave behind.
+     */
     switch (dir)
     {
         case MOTOR_DIR_OPEN:
-            IA_LOW();
-            IB_HIGH();
+            write_direction(1U, 0U);
             break;
 
         case MOTOR_DIR_CLOSE:
-            IA_HIGH();
-            IB_LOW();
+            write_direction(0U, 1U);
             break;
 
         case MOTOR_DIR_BRAKE:
-            IA_HIGH();
-            IB_HIGH();
+            write_direction(1U, 1U);
             break;
 
         case MOTOR_DIR_STOP:
         default:
-            IA_LOW();
-            IB_LOW();
+            write_direction(0U, 0U);
             break;
+    }
+
+    /* The carrier: high = the direction above is driven, low = not driven. */
+    if (output != 0U)
+    {
+        PWM_HIGH();
+    }
+    else
+    {
+        PWM_LOW();
     }
 }
 
-/** Release both bridge inputs (coast). */
+/** Release the bridge: direction inputs low and the carrier low (no drive). */
 static void outputs_release(void)
 {
-    IA_LOW();
-    IB_LOW();
+    write_direction(0U, 0U);
+    PWM_LOW();
 }
 
 /*===========================================================================*/
@@ -142,15 +176,21 @@ void Motor_Init(void)
 
     RCC_APB2PeriphClockCmd(MOTOR_RCC, ENABLE);
 
-    /* Release the bridge before enabling the outputs so power-up cannot kick
-       the motor. */
-    IA_LOW();
-    IB_LOW();
+    /* Drive every pin to its harmless level BEFORE switching it to an output, and
+       leave the driver in standby, so power-up cannot kick the motor. STBY low is
+       the TB6612's own disable: the outputs stay off whatever the inputs say. */
+    write_direction(0U, 0U);
+    PWM_LOW();
+    STBY_LOW();
 
-    GPIO_InitStructure.GPIO_Pin   = MOTOR_IA_PIN | MOTOR_IB_PIN;
     GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_Out_PP;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_Init(MOTOR_IA_PORT, &GPIO_InitStructure);
+
+    GPIO_InitStructure.GPIO_Pin = MOTOR_AIN1_PIN | MOTOR_AIN2_PIN;
+    GPIO_Init(MOTOR_AIN1_PORT, &GPIO_InitStructure);
+
+    GPIO_InitStructure.GPIO_Pin = MOTOR_PWM_PIN | MOTOR_STBY_PIN;
+    GPIO_Init(MOTOR_PWM_PORT, &GPIO_InitStructure);
 
     s_dir         = MOTOR_DIR_STOP;
     s_dutyNow     = 0U;
@@ -164,6 +204,11 @@ void Motor_EmergencyStop(void)
 {
     /* No ramp, no delay block: this runs from the limit/estop interrupt. */
     outputs_release();
+
+    /* ...and drop STBY as well. This is the one place a torn write could not
+       undo: with the driver in standby the outputs are off no matter what the
+       direction pins were left holding. */
+    STBY_LOW();
 
     s_dir        = MOTOR_DIR_STOP;
     s_dutyNow    = 0U;
@@ -230,6 +275,12 @@ void Motor_Run(MotorDir_t dir)
        stalled 130 motor, whose locked-rotor current is several times rated. */
     s_dutyNow   = 0U;
     s_rampAccum = 0U;
+
+    /* Put the direction on the pins with the carrier still low, and only THEN
+       enable the driver. Raising STBY first would let the chip drive whatever the
+       direction pins happened to hold from the previous move. */
+    apply_output(dir, 0U);
+    STBY_HIGH();
 }
 
 void Motor_SetDuty(uint8_t percent)

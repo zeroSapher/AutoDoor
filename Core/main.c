@@ -20,18 +20,22 @@
   *
   * WIRING (see Core/main.h for the macros)
   *   OLED SCL/SDA  PB10/PB11      EEPROM shares the same bus
-  *   open limit    PA0   (EXTI0)  close limit  PA1   (EXTI1)
   *   sensor out    PB12  (EXTI12) sensor in    PB13  (EXTI13)
   *   keys          PB5..PB8 (EXTI5..8)
-  *   buzzer        PB3            motor IA/IB  PA4/PA5 -> L9110S
+  *   buzzer        PB3            status LED   PB4
+  *   motor         AIN1/AIN2 PA4/PA5, PWMA PB0, STBY PB1 -> TB6612FNG
   *   console       PA9/PA10 (USART1, 115200 8N1)
   *
-  * Those eight EXTI inputs sit on eight DISTINCT pin numbers, which Core/main.h
+  * No limit switches are fitted: PA0/PA1 are unconnected and claim no EXTI line
+  * (see Core/main.h).
+  *
+  * Those six EXTI inputs sit on six DISTINCT pin numbers, which Core/main.h
   * enforces at compile time and Exti_ConfigPin() at run time. It is not a style
   * preference: AFIO routes one port per line, so two inputs on one number means
   * the later initialiser takes the line and the earlier one silently has no
   * interrupt. The sensors were on PB0/PB1 until round 11, and the limit switches
-  * had no interrupt at all because of it.
+  * had no interrupt at all because of it. The end stops are gone now, so those
+  * lines are free - the rule is what keeps the NEXT input honest.
   ******************************************************************************
   */
 

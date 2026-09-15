@@ -25,11 +25,17 @@ KEY4
 LED_STATUS
     PB4    STATUS_LED       Status LED (state blink)     [both]
 
-MOTOR_IA
-    PA4    MOTOR_IA         L9110S IA                    [both]
+MOTOR_AIN1
+    PA4    MOTOR_AIN1       TB6612 AIN1 (direction)      [both]
 
-MOTOR_IB
-    PA5    MOTOR_IB         L9110S IB                    [both]
+MOTOR_AIN2
+    PA5    MOTOR_AIN2       TB6612 AIN2 (direction)      [both]
+
+MOTOR_PWMA
+    PB0    MOTOR_PWM        TB6612 PWMA (speed, PB0 = TIM3_CH3) [both]
+
+MOTOR_STBY
+    PB1    MOTOR_STBY       TB6612 STBY (enable, active high) [both]
 
 SENSOR_IN
     PB13   SENSOR_IN        Inside presence              [both]

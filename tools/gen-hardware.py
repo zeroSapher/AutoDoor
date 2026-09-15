@@ -86,8 +86,10 @@ NET_TABLE = [
     ("KEY3",              "KEY3",           "Manual open",        BOTH),
     ("KEY4",              "KEY4",           "Manual close / e-stop", BOTH),
     ("BUZZER",            "BUZZER",         "Buzzer drive",       BOTH),
-    ("MOTOR_IA",          "MOTOR_IA",       "L9110S IA",          BOTH),
-    ("MOTOR_IB",          "MOTOR_IB",       "L9110S IB",          BOTH),
+    ("MOTOR_AIN1",        "MOTOR_AIN1",     "TB6612 AIN1 (direction)", BOTH),
+    ("MOTOR_AIN2",        "MOTOR_AIN2",     "TB6612 AIN2 (direction)", BOTH),
+    ("MOTOR_PWM",         "MOTOR_PWMA",     "TB6612 PWMA (speed, PB0 = TIM3_CH3)", BOTH),
+    ("MOTOR_STBY",        "MOTOR_STBY",     "TB6612 STBY (enable, active high)", BOTH),
 ]
 
 # ---------------------------------------------------------------------------
@@ -145,7 +147,7 @@ BOM = [
     # RefDes, Qty, Value, Package, Description
     ("U1",  1, "STM32F103C8T6",    "LQFP48",   "Main microcontroller"),
     ("U2",  1, "AMS1117-3.3",      "SOT-223",  "5V to 3.3V regulator"),
-    ("U3",  1, "L9110S module",    "Module",   "Dual H-bridge, 1 channel used"),
+    ("U3",  1, "TB6612FNG module", "Module",   "Dual H-bridge, 1 channel used; STBY is driven, not jumpered"),
     ("U4",  1, "0.96in SSD1306",   "Module",   "128x64 OLED, I2C addr 0x78"),
     ("U5",  1, "AT24C32 module",   "Module",   "4 KB I2C EEPROM, addr 0xA0"),
     ("M1",  1, "130 DC motor",     "130",      "3-6 V toy motor, needs gearing"),
