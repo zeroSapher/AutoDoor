@@ -7,11 +7,15 @@
     real firmware, using the OLED12864 I2C display model.
 
     What changes versus tools/build.ps1:
-            - Display backend: Display_Oled.c + SSD1306-compatible OLED driver
-            - EEPROM uses EEPROM_Stub.c because persistence is not part of the display
-                simulation; the application must report that storage is unavailable.
+      - EEPROM uses EEPROM_Stub.c instead of EEPROM.c: persistence is not part of
+        the display simulation, and the application must report that storage is
+        unavailable.
       - Defines AUTODOOR_SIM_BUILD so the firmware can report which variant it is.
       - Output goes to build-sim/ so the two builds never overwrite each other.
+
+    The DISPLAY backend is not a difference: the real and simulation builds both
+    use Hardware/OLED + App/Display_Oled.c, and the two source lists in
+    tools/sources.ps1 differ only in the EEPROM translation unit.
 
     IMPORTANT: the simulation build can exercise the OLED I2C display and GPIO
     inputs, but not EEPROM persistence or the real NC motor power-cut circuit. See
