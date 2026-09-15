@@ -573,6 +573,28 @@ try {
 
     Step-Var 'KEY3 long on the status screen is a harmless no-op' { Inject-Key $KEY_OPEN 'long' } `
              -Expr "'Display.c'::s_screen" -ExpectRegex 'DISP_SCREEN_STATUS'
+
+    # -----------------------------------------------------------------------
+    Write-Host ''
+    Write-Host '--- G. runtime parameters: SPEED= ---'
+    # -----------------------------------------------------------------------
+
+    Step 'SPEED= sets the travel duty' { Send-Cmd 'SPEED=50' } `
+         -Expect 'OK SPEED=50%' -TimeoutMs 3000
+
+    Step 'STATUS? reports the new duty' { Send-Cmd 'STATUS?' } `
+         -Expect 'SPEED=50%' -TimeoutMs 3000
+
+    # Below MOTOR_MIN_DUTY the motor will not turn, so the command must refuse
+    # rather than accept a number that Motor_Run() would silently raise again.
+    Step 'a duty below the motor floor is refused' { Send-Cmd 'SPEED=10' } `
+         -Expect 'ERR RANGE 25\.\.100' -TimeoutMs 3000
+
+    Step 'a non-numeric duty is refused' { Send-Cmd 'SPEED=fast' } `
+         -Expect 'ERR BAD_ARG' -TimeoutMs 3000
+
+    Step 'DEFAULTS puts the duty back' { Send-Cmd 'DEFAULTS' } `
+         -Expect 'speed=70%' -TimeoutMs 3000
 } catch {
     # Remembered, not rethrown here: exit inside a finally block terminates the
     # script and would swallow the reason. It is reported after the summary.

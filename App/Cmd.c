@@ -121,6 +121,7 @@ void Cmd_ReportStatus(void)
     UART_Printf(" DOOR=%s", Door_StateName(Door_GetState()));
     UART_Printf(" FAULT=%s", Door_FaultName(Door_GetFault()));
     UART_Printf(" DELAY=%ums", (unsigned)Door_GetAutoCloseMs());
+    UART_Printf(" SPEED=%u%%", (unsigned)Door_GetTravelDuty());
     UART_Printf(" CNT=%u", (unsigned)Log_Count());
     UART_Printf(" TOTAL=%lu", (unsigned long)Log_TotalEvents());
 
@@ -436,6 +437,48 @@ void Cmd_Process(void)
         return;
     }
 
+    /* ---- SPEED=<%> ------------------------------------------------------ */
+    if (strncmp(line, "SPEED=", 6) == 0)
+    {
+        if (parse_u32(&line[6], &value) != 0U)
+        {
+            UART_SendString("ERR BAD_ARG\r\n");
+            return;
+        }
+
+        /* Validate before narrowing, exactly as DELAY does: truncating to uint8
+           first would turn 300 into 44 and accept it. */
+        if (value > 100UL)
+        {
+            UART_Printf("ERR RANGE %u..%u\r\n",
+                        (unsigned)MOTOR_DUTY_MIN, (unsigned)MOTOR_DUTY_MAX);
+            return;
+        }
+
+        if (Door_SetTravelDuty((uint8_t)value) != 0U)
+        {
+            UART_Printf("ERR RANGE %u..%u\r\n",
+                        (unsigned)MOTOR_DUTY_MIN, (unsigned)MOTOR_DUTY_MAX);
+            return;
+        }
+
+        Log_Add(LOG_EVT_PARAM_CHANGE, (uint8_t)Door_GetState(),
+                (uint8_t)Door_GetMode(), 0U);
+
+        /*
+         * Deliberately NOT persisted, unlike DELAY and MODE. Those are settings
+         * the end user owns; this is a commissioning value, and it is coupled to
+         * the calibrated travel time: the duty sets how fast the door moves, so a
+         * number that is right for a rig on the bench can be wrong for the
+         * finished door, and the value that ships belongs in MOTOR_DEFAULT_DUTY
+         * where it is visible in the source and in the BOM notes. Saying so is
+         * better than a silent "OK" that implies it will survive a power cut.
+         */
+        UART_Printf("OK SPEED=%u%% (not saved - put it in MOTOR_DEFAULT_DUTY)\r\n",
+                    (unsigned)value);
+        return;
+    }
+
     /* ---- MODE=AUTO | MODE=MANUAL ---------------------------------------- */
     if (strncmp(line, "MODE=", 5) == 0)
     {
@@ -563,6 +606,10 @@ void Cmd_Process(void)
            default settings would be a surprising and irreversible side effect. */
         Door_SetAutoCloseMs(DOOR_AUTO_CLOSE_MS);
         Door_SetMode(DOOR_MODE_AUTO);
+        /* The travel duty belongs to the build, not to the settings, but DEFAULTS
+           claims to restore defaults and leaving the door at a tuned speed would
+           make that a half-truth. */
+        (void)Door_SetTravelDuty(MOTOR_DEFAULT_DUTY);
 
         /* Both writes are reported, not discarded. */
         persistOk = ((Log_SetAutoCloseMs(DOOR_AUTO_CLOSE_MS) == MYI2C_OK) &&
@@ -574,14 +621,16 @@ void Cmd_Process(void)
 
         if (persistOk != 0U)
         {
-            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO (log kept)\r\n",
-                        (unsigned)DOOR_AUTO_CLOSE_MS);
+            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO speed=%u%% (log kept)\r\n",
+                        (unsigned)DOOR_AUTO_CLOSE_MS,
+                        (unsigned)Door_GetTravelDuty());
         }
         else
         {
-            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO "
+            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO speed=%u%% "
                         "(NOT PERSISTED - eeprom write failed)\r\n",
-                        (unsigned)DOOR_AUTO_CLOSE_MS);
+                        (unsigned)DOOR_AUTO_CLOSE_MS,
+                        (unsigned)Door_GetTravelDuty());
         }
         return;
     }
@@ -596,6 +645,7 @@ void Cmd_Process(void)
         UART_SendString("  LOG?ALL           list every retained record\r\n");
         UART_SendString("  LOG?CLEAR         erase all records\r\n");
         UART_SendString("  DELAY=<ms>        auto-close delay, 1000..30000\r\n");
+        UART_SendString("  SPEED=<%>         travel duty, 25..100 (runtime only)\r\n");
         UART_SendString("  MODE=AUTO|MANUAL  set the operating mode\r\n");
         UART_SendString("  DOOR=OPEN|CLOSE   manual travel command\r\n");
         UART_SendString("  STOP              emergency stop (latches)\r\n");

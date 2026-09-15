@@ -45,6 +45,11 @@ static uint16_t    s_lastTravelMs   = 0U;   /* duration of the last completed mo
 static uint8_t     s_closeWarned    = 0U;   /* one-shot for the closing warning */
 
 static uint16_t    s_autoCloseMs    = DOOR_AUTO_CLOSE_MS;
+/* Travel duty, adjustable at runtime with SPEED=<%>. It changes how long the door
+   takes, which is why it is a commissioning value rather than a setting: the
+   position is a timed estimate, so a duty that suits the bench rig is wrong for
+   the finished door (see the note in Cmd.c). */
+static uint8_t     s_travelDuty     = MOTOR_DEFAULT_DUTY;
 
 /* Pending notifications, set by the input paths and consumed by Door_Update.
    Keeping them as flags (rather than acting immediately) ensures every decision
@@ -123,7 +128,7 @@ static void begin_open(void)
     Motor_Run(MOTOR_DIR_OPEN);
     /* The L9110S has no separate enable pin, so the ramp in Motor.c is doing the
        soft start; the duty is the normal travel speed. */
-    Motor_SetDuty(MOTOR_DEFAULT_DUTY);
+    Motor_SetDuty(s_travelDuty);
 
     set_state(DOOR_STATE_OPENING);
     emit_event(LOG_EVT_OPEN_START, 0U);
@@ -135,7 +140,7 @@ static void begin_close(void)
     s_closeWarned   = 0U;
 
     Motor_Run(MOTOR_DIR_CLOSE);
-    Motor_SetDuty(MOTOR_DEFAULT_DUTY);
+    Motor_SetDuty(s_travelDuty);
 
     set_state(DOOR_STATE_CLOSING);
 
@@ -588,6 +593,33 @@ uint8_t Door_SetAutoCloseMs(uint16_t ms)
 uint16_t Door_GetAutoCloseMs(void)
 {
     return s_autoCloseMs;
+}
+
+uint8_t Door_SetTravelDuty(uint8_t percent)
+{
+    if ((percent < MOTOR_DUTY_MIN) || (percent > MOTOR_DUTY_MAX))
+    {
+        return 1U;
+    }
+
+    s_travelDuty = percent;
+
+    /* Push it to the motor if a move is already in progress. Motor_SetDuty() only
+       moves the ramp TARGET, so the change is applied smoothly by the existing
+       ramp instead of jumping - which matters when this is being tuned while
+       watching the door. */
+    if ((s_state == DOOR_STATE_OPENING) || (s_state == DOOR_STATE_CLOSING) ||
+        (s_state == DOOR_STATE_REVERSING))
+    {
+        Motor_SetDuty(percent);
+    }
+
+    return 0U;
+}
+
+uint8_t Door_GetTravelDuty(void)
+{
+    return s_travelDuty;
 }
 
 void Door_SetMode(DoorMode_t mode)

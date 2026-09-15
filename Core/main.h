@@ -370,6 +370,14 @@ typedef char exti_inputs_must_occupy_distinct_line_numbers[
 #define MOTOR_RAMP_DOWN_MS      200U
 #define MOTOR_DEFAULT_DUTY      70U     /* percent for normal travel */
 #define MOTOR_MIN_DUTY          25U     /* below this a 130 motor will not turn */
+/*
+ * Range accepted by the SPEED=<%> console command. The floor is MOTOR_MIN_DUTY
+ * rather than something lower on purpose: Motor_Run() raises any duty target
+ * below MOTOR_MIN_DUTY back up to it, so accepting a smaller number here would
+ * mean the command reports a duty the motor never actually gets.
+ */
+#define MOTOR_DUTY_MIN          MOTOR_MIN_DUTY
+#define MOTOR_DUTY_MAX          100U
 
 /*===========================================================================*/
 /*  Door behaviour                                                           */

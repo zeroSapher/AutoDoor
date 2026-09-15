@@ -136,6 +136,18 @@ uint8_t Door_SetAutoCloseMs(uint16_t ms);
 /** @return The auto-close delay currently in use. */
 uint16_t Door_GetAutoCloseMs(void);
 
+/**
+  * @brief  Set the duty used for travel, in percent.
+  * @return 0 on success, non-zero when the value is outside MOTOR_DUTY_MIN..MAX.
+  * @note   Applied to a move already in progress, so it can be tuned while the
+  *         door is running. Changing it changes how long the door takes, which is
+  *         what DOOR_TRAVEL_MS has to be calibrated against.
+  */
+uint8_t Door_SetTravelDuty(uint8_t percent);
+
+/** @return The travel duty currently in use, in percent. */
+uint8_t Door_GetTravelDuty(void);
+
 /** @brief Switch mode. Logs a MODE_CHANGE event when the mode really changes. */
 void Door_SetMode(DoorMode_t mode);
 
