@@ -101,6 +101,10 @@ void     UART_Flush(void);
   * @param  maxLen  Size of buffer, including the terminator.
   * @return Number of bytes stored (excluding the terminator), or 0 when no
   *         complete line is available yet. The line terminator is not stored.
+  * @note   A partially received line is held inside UART.c between calls, so a
+  *         line split across several calls (the normal case on a USB-serial
+  *         link) is assembled correctly. On a 0 return @p buffer is untouched.
+  *         A line longer than UART_LINE_BUFFER_SIZE-1 is reported truncated.
   */
 uint16_t UART_ReadLine(char *buffer, uint16_t maxLen);
 

@@ -60,6 +60,19 @@ extern "C" {
 #define UART_BAUDRATE           115200U
 #define UART_RX_BUFFER_SIZE     128U    /* must be a power of two */
 /*
+ * Assembled-line buffer owned by UART.c, NOT by the caller of UART_ReadLine().
+ *
+ * A command line does not arrive atomically: the USB-serial bridge hands the
+ * bytes to the USART one interrupt at a time, and the main loop is fast enough
+ * that it calls UART_ReadLine() several times in the middle of a nine-byte
+ * burst. The partial line therefore has to survive from one call to the next.
+ * It is deliberately larger than CMD_LINE_MAX so that UART.c stays independent
+ * of the application layer: an over-long line is saturated here and reported to
+ * the caller truncated, which the command dispatcher answers with UNKNOWN_CMD
+ * instead of staying silent forever.
+ */
+#define UART_LINE_BUFFER_SIZE   64U
+/*
  * Transmit is buffered too, and this size is the headroom that keeps the door
  * state machine responsive during a long output burst.
  *

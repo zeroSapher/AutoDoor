@@ -28,6 +28,21 @@ static volatile uint8_t  s_rxBuffer[UART_RX_BUFFER_SIZE];
 static volatile uint16_t s_rxHead = 0U;     /* ISR write index   */
 static volatile uint16_t s_rxTail = 0U;     /* consumer read idx */
 
+/*
+ * Line assembler state for UART_ReadLine(). It lives here and not in the
+ * caller's buffer on purpose. The earlier version read bytes out of the ring
+ * into a caller-owned buffer and, when it ran out of bytes before seeing the
+ * terminator, returned 0 and threw those bytes away. Because the main loop runs
+ * far faster than one character time at 115200 baud, it almost always called
+ * the function part way through a burst: the characters were consumed and
+ * dropped, and the '\n' that arrived in a later call completed an empty line.
+ * The result was that every command typed at the console was silently eaten.
+ * Keeping the partial line across calls makes a split line indistinguishable
+ * from one that arrived in a single piece.
+ */
+static char     s_lineBuffer[UART_LINE_BUFFER_SIZE];
+static uint16_t s_lineLen = 0U;
+
 /*===========================================================================*/
 /*  TX ring buffer                                                           */
 /*===========================================================================*/
@@ -296,8 +311,9 @@ void UART_Flush(void)
 
 uint16_t UART_ReadLine(char *buffer, uint16_t maxLen)
 {
-    uint16_t count = 0U;
     uint8_t  byte;
+    uint16_t n;
+    uint16_t i;
 
     if ((buffer == 0) || (maxLen == 0U))
     {
@@ -314,20 +330,33 @@ uint16_t UART_ReadLine(char *buffer, uint16_t maxLen)
 
         if (byte == (uint8_t)'\n')
         {
-            buffer[count] = '\0';
-            return count;
+            n = s_lineLen;
+            if (n > (uint16_t)(maxLen - 1U))
+            {
+                n = (uint16_t)(maxLen - 1U);     /* report the line truncated */
+            }
+
+            for (i = 0U; i < n; i++)
+            {
+                buffer[i] = s_lineBuffer[i];
+            }
+            buffer[n] = '\0';
+
+            s_lineLen = 0U;
+            return n;
         }
 
-        if (count < (uint16_t)(maxLen - 1U))
+        if (s_lineLen < (uint16_t)(UART_LINE_BUFFER_SIZE - 1U))
         {
-            buffer[count++] = (char)byte;
+            s_lineBuffer[s_lineLen] = (char)byte;
+            s_lineLen++;
         }
-        /* Beyond maxLen-1 the byte is dropped, keeping the buffer terminated. */
+        /* Beyond UART_LINE_BUFFER_SIZE-1 the byte is dropped; the line is
+           still delivered, just truncated. */
     }
 
-    /* No terminator yet: leave the partial line in the caller's buffer but
-       report that no complete line is available. */
-    buffer[count] = '\0';
+    /* No terminator yet. The bytes already read stay in s_lineBuffer, so the
+       rest of the line can complete it on a later call. */
     return 0U;
 }
 
