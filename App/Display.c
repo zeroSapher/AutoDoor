@@ -557,12 +557,33 @@ uint8_t Display_HandleKey(uint8_t isOpenKey, uint8_t isLongPress)
 {
     /*
      * Navigation must never steal a door command. KEY3/KEY4 are the manual
-     * open/close keys, so they are only treated as browsing controls when there
-     * is nothing to command: manual mode, door not moving, system disabled.
-     * In auto mode, or while the door is travelling, they go straight through to
-     * the door controller.
+     * open/close keys, so a SHORT press is only treated as browsing when there is
+     * nothing to command: manual mode, door not moving, system disabled. In auto
+     * mode, or while the door is travelling, it goes straight through to the door
+     * controller.
      */
     uint8_t browsingAllowed;
+
+    if (isLongPress != 0U)
+    {
+        /*
+         * A long press is never a door command - the door is driven by short
+         * presses only - so it can always act as the "get me out of here"
+         * gesture. It used to be gated behind the same browsing condition as a
+         * short press, which made it a silent no-op in AUTO mode or whenever the
+         * system was enabled: the caller discards a 0 return, so the gesture the
+         * wiring guide documents simply did nothing and the only way off the log
+         * screen was KEY2's screen cycle. Returning 0 here means only that there
+         * was nothing to leave.
+         */
+        if (s_screen != DISP_SCREEN_LOG)
+        {
+            return 0U;
+        }
+
+        Display_SetScreen(DISP_SCREEN_STATUS);
+        return 1U;
+    }
 
     browsingAllowed = ((s_mode == DOOR_MODE_MANUAL) &&
                        (s_running == 0U) &&
@@ -571,14 +592,6 @@ uint8_t Display_HandleKey(uint8_t isOpenKey, uint8_t isLongPress)
     if (browsingAllowed == 0U)
     {
         return 0U;
-    }
-
-    if (isLongPress != 0U)
-    {
-        /* A long press on either key jumps back to the live status screen, which
-           is the natural "get me out of here" gesture. */
-        Display_SetScreen(DISP_SCREEN_STATUS);
-        return 1U;
     }
 
     /* Short press: KEY3 pages to older records, KEY4 to newer. */

@@ -95,10 +95,15 @@ void Display_LogScroll(uint8_t dir);
   * @brief  Handle a key press that may be a screen-navigation action.
   * @return 1 when the key was consumed by the display, 0 when the caller should
   *         handle it normally.
-  * @note   Navigation only claims KEY3/KEY4 while the log screen is open AND the
-  *         system is in manual mode with the door idle. Otherwise those keys must
-  *         reach the door controller - silently swallowing a manual-open command
-  *         because a menu is open would be a genuine operational bug.
+  * @note   A SHORT press of KEY3/KEY4 is a door command, so navigation only
+  *         claims it while the log screen is open AND the system is in manual
+  *         mode with the door idle. Otherwise those keys must reach the door
+  *         controller - silently swallowing a manual-open command because a menu
+  *         is open would be a genuine operational bug.
+  * @note   A LONG press is not a door command at all (the door uses short presses
+  *         only), so it always leaves the log screen, in any mode and whether or
+  *         not the system is enabled. A 0 return then means "there was nothing to
+  *         leave", i.e. the log screen was not open.
   */
 uint8_t Display_HandleKey(uint8_t isOpenKey, uint8_t isLongPress);
 
