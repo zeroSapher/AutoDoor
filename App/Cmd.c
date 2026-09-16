@@ -43,7 +43,7 @@ static void print_timestamp(uint32_t ms)
     uint32_t seconds = (ms / 1000UL) % 60UL;
     uint32_t millis  = ms % 1000UL;
 
-    UART_Printf("%lu:%02lu:%02lu.%03lu",
+    UART_Printf("%02lu:%02lu:%02lu.%03lu",
                 (unsigned long)hours,
                 (unsigned long)minutes,
                 (unsigned long)seconds,
