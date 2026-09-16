@@ -436,13 +436,49 @@ void Cmd_Process(void)
         return;
     }
 
+    /* ---- TRAVEL=<ms> ---------------------------------------------------- */
+    if (strncmp(line, "TRAVEL=", 7) == 0)
+    {
+        if (parse_u32(&line[7], &value) != 0U)
+        {
+            UART_SendString("ERR BAD_ARG\r\n");
+            return;
+        }
+
+        /* Validate the wide value before narrowing, exactly as DELAY does:
+           casting first would turn 200000 into 3392 and accept it. */
+        if ((value < MOTOR_TRAVEL_MIN_MS) || (value > MOTOR_TRAVEL_MAX_MS))
+        {
+            UART_Printf("ERR RANGE %u..%u\r\n",
+                        (unsigned)MOTOR_TRAVEL_MIN_MS, (unsigned)MOTOR_TRAVEL_MAX_MS);
+            return;
+        }
+
+        (void)Motor_SetTravelMs((uint16_t)value);
+
+        Log_Add(LOG_EVT_PARAM_CHANGE, (uint8_t)Door_GetState(),
+                (uint8_t)Door_GetMode(), 0U);
+
+        /*
+         * Echo the number that actually decides the feel of the door: how far the
+         * pulse moves between two servo frames. That, not the millisecond figure,
+         * is what the SG90 reacts to - below ~10 us per frame it ignores the change
+         * for several frames and the door visibly steps. Not persisted, for the
+         * same reason as SPEED: it is a commissioning value tied to this rig.
+         */
+        UART_Printf("OK TRAVEL=%ums (%u us of pulse per 20 ms frame)\r\n",
+                    (unsigned)value,
+                    (unsigned)(((uint32_t)(SERVO_OPEN_US - SERVO_CLOSED_US) * 20U) / value));
+        return;
+    }
+
     /* ---- SPEED=<%> ------------------------------------------------------ */
     if (strncmp(line, "SPEED=", 6) == 0)
     {
         /* An SG90 has no duty to set: its speed is fixed by the servo, and the only
-           thing shaping motion on this branch is DOOR_TRAVEL_MS (the slew step is
+           thing shaping motion on this branch is the travel time (the slew step is
            derived from it). Saying so beats accepting a number and ignoring it. */
-        UART_SendString("ERR N/A - SG90 speed is fixed (tune DOOR_TRAVEL_MS)\r\n");
+        UART_SendString("ERR N/A - SG90 speed is fixed (use TRAVEL=<ms>)\r\n");
         return;
         if (parse_u32(&line[6], &value) != 0U)
         {
@@ -649,7 +685,10 @@ void Cmd_Process(void)
         UART_SendString("  LOG?ALL           list every retained record\r\n");
         UART_SendString("  LOG?CLEAR         erase all records\r\n");
         UART_SendString("  DELAY=<ms>        auto-close delay, 1000..30000\r\n");
-        UART_SendString("  SPEED=<%>         travel duty, 25..100 (runtime only)\r\n");
+        UART_SendString("  TRAVEL=<ms>       door travel time, 600..4000 (default 1500)\r\n");
+        UART_SendString("                    bigger = slower and smoother; 1000..2000 is the\r\n");
+        UART_SendString("                    window where an SG90 sweeps instead of stepping\r\n");
+        UART_SendString("  SPEED=<%>         n/a on the SG90 build - use TRAVEL=<ms>\r\n");
         UART_SendString("  MODE=AUTO|MANUAL  set the operating mode\r\n");
         UART_SendString("  DOOR=OPEN|CLOSE   manual travel command\r\n");
         UART_SendString("  STOP              emergency stop (latches)\r\n");

@@ -53,6 +53,21 @@ void Motor_SetDuty(uint8_t percent);
 /** @return The duty currently being applied (mid-ramp), in percent. */
 uint8_t Motor_GetDuty(void);
 
+/**
+  * @brief  Set how long one full door move should take, in milliseconds.
+  * @param  ms  MOTOR_TRAVEL_MIN_MS .. MOTOR_TRAVEL_MAX_MS.
+  * @return 1 when applied, 0 when out of range - in which case nothing changes.
+  * @note   On the servo build this IS the smoothness control: the slew advances
+  *         (pulse span / travel time) per millisecond, so a longer travel time is
+  *         a slower, gentler door. Safe to call mid-move: the pulse target is
+  *         kept and only the rate changes. The door's travel watchdog follows
+  *         this value, so a deliberately slowed move is not read as a stall.
+  */
+uint8_t Motor_SetTravelMs(uint16_t ms);
+
+/** @return The travel time currently in use, in milliseconds. */
+uint16_t Motor_GetTravelMs(void);
+
 /** @return The direction currently commanded. */
 MotorDir_t Motor_GetDir(void);
 

@@ -63,7 +63,12 @@
 #define PULSE_UNITS_PER_US  100U
 #define PULSE_CLOSED        ((uint32_t)SERVO_CLOSED_US * PULSE_UNITS_PER_US)
 #define PULSE_OPEN          ((uint32_t)SERVO_OPEN_US * PULSE_UNITS_PER_US)
-#define SLEW_STEP           ((PULSE_OPEN - PULSE_CLOSED) / DOOR_TRAVEL_MS)
+/* The slew step, in hundredths of a microsecond per millisecond. DOOR_TRAVEL_MS is
+   only the power-on DEFAULT: the live value lives in s_slewStep / s_travelMs so
+   that TRAVEL=<ms> can retune the door without a reflash (see Motor_SetTravelMs).
+   Smoothness is perceptual and depends on the linkage, so the number that ships is
+   a starting point, not an answer. */
+#define SLEW_STEP_DEFAULT   ((PULSE_OPEN - PULSE_CLOSED) / DOOR_TRAVEL_MS)
 
 _Static_assert((SERVO_OPEN_US > SERVO_CLOSED_US),
                "servo open pulse must be longer than the closed pulse");
@@ -77,8 +82,10 @@ _Static_assert(((PULSE_OPEN - PULSE_CLOSED) >= DOOR_TRAVEL_MS),
 /*===========================================================================*/
 
 static volatile MotorDir_t s_dir         = MOTOR_DIR_STOP;
-static volatile uint32_t   s_pulseNow    = PULSE_CLOSED;   /* tenths of a us */
+static volatile uint32_t   s_pulseNow    = PULSE_CLOSED;   /* hundredths of a us */
 static volatile uint32_t   s_pulseTarget = PULSE_CLOSED;
+static volatile uint32_t   s_slewStep    = SLEW_STEP_DEFAULT; /* hundredths/ms   */
+static volatile uint16_t   s_travelMs    = DOOR_TRAVEL_MS;    /* what it means   */
 static uint8_t             s_initialised = 0U;
 
 /*===========================================================================*/
@@ -251,6 +258,38 @@ uint8_t Motor_GetDuty(void)
     return pulse_to_percent(s_pulseNow);
 }
 
+uint8_t Motor_SetTravelMs(uint16_t ms)
+{
+    uint32_t span = (uint32_t)(PULSE_OPEN - PULSE_CLOSED);
+    uint32_t step;
+
+    if ((ms < MOTOR_TRAVEL_MIN_MS) || (ms > MOTOR_TRAVEL_MAX_MS))
+    {
+        return 0U;
+    }
+
+    step = span / (uint32_t)ms;
+
+    /* Inside the accepted range this cannot be zero (the span is 100000 hundredths
+       and the longest travel is 4000 ms). It is still checked because a zero step
+       means "the servo never moves" - the exact failure this file was rewritten to
+       fix - and that is too important to leave to arithmetic to guarantee. */
+    if (step == 0U)
+    {
+        step = 1U;
+    }
+
+    s_slewStep = step;
+    s_travelMs = ms;
+
+    return 1U;
+}
+
+uint16_t Motor_GetTravelMs(void)
+{
+    return s_travelMs;
+}
+
 MotorDir_t Motor_GetDir(void)
 {
     return s_dir;
@@ -280,13 +319,13 @@ void Motor_Tick1ms(void)
 
     if (s_pulseNow < s_pulseTarget)
     {
-        uint32_t next = s_pulseNow + SLEW_STEP;
+        uint32_t next = s_pulseNow + s_slewStep;
 
         s_pulseNow = (next > s_pulseTarget) ? s_pulseTarget : next;
     }
     else
     {
-        uint32_t next = s_pulseNow - SLEW_STEP;
+        uint32_t next = s_pulseNow - s_slewStep;
 
         s_pulseNow = (next < s_pulseTarget) ? s_pulseTarget : next;
     }

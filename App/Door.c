@@ -414,7 +414,21 @@ void Door_Update(void)
         (s_state == DOOR_STATE_CLOSING) ||
         (s_state == DOOR_STATE_REVERSING))
     {
-        if ((g_msTick - s_travelStartMs) > DOOR_TRAVEL_TIMEOUT_MS)
+        /*
+         * Follow the LIVE travel time, not the compile-time default. TRAVEL=<ms>
+         * can slow the servo down at runtime, and a timeout derived from a fixed
+         * 1500 ms would then fire in the middle of a perfectly healthy slow move
+         * and latch FAULT_OPEN_TIMEOUT / FAULT_CLOSE_TIMEOUT. The number that
+         * drives the slew is the same number that decides how long "still
+         * travelling" is legal.
+         */
+#if defined(MOTOR_IS_POSITION_ACTUATOR) && MOTOR_IS_POSITION_ACTUATOR
+        uint32_t travelTimeoutMs = (uint32_t)Motor_GetTravelMs() + DOOR_TRAVEL_MARGIN_MS;
+#else
+        uint32_t travelTimeoutMs = DOOR_TRAVEL_TIMEOUT_MS;
+#endif
+
+        if ((g_msTick - s_travelStartMs) > travelTimeoutMs)
         {
             /*
              * Report the direction that actually failed. A reversal is heading
@@ -504,6 +518,25 @@ void Door_KeyStartStop(void)
         {
             set_state(DOOR_STATE_IDLE);
         }
+
+#if defined(MOTOR_IS_POSITION_ACTUATOR) && MOTOR_IS_POSITION_ACTUATOR
+        /*
+         * Drive the actuator to the position just decided.
+         *
+         * A servo is an absolute-position device and this is the only thing that
+         * makes the mechanism agree with the state machine. Without it, a move
+         * interrupted by STOP, or a RESET, leaves the servo wherever it happened
+         * to be while the firmware believes closed (or open): the door then sits
+         * somewhere else, and the next command only covers part of the swing -
+         * which is what "opening and closing move by different angles" actually
+         * was. The command costs nothing when the two already agree, because the
+         * slew simply has nothing to travel.
+         *
+         * Not done on the motor builds: they have no absolute position to command
+         * (see the note on MOTOR_IS_POSITION_ACTUATOR in Core/main.h).
+         */
+        Motor_Run((s_state == DOOR_STATE_OPEN) ? MOTOR_DIR_OPEN : MOTOR_DIR_CLOSE);
+#endif
 
         emit_event(LOG_EVT_SYSTEM_START, 0U);
     }

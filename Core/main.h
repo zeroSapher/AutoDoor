@@ -222,9 +222,30 @@ extern "C" {
 
 /* Full travel, in milliseconds. On this branch it is NOT a guess to be calibrated:
    Hardware/Motor/Motor.c derives the servo slew step from it, so the door takes
-   this long by construction and the position estimate is exact. 4000 ms is a
-   deliberately slow demonstration sweep (0.25 us of pulse per ms). */
-#define DOOR_TRAVEL_MS          100U
+   this long by construction and the position estimate is exact.
+ *
+ * Why 1500 ms is the default, in the units the servo actually sees:
+ *
+ *     1000 us of pulse span / 1500 ms = 0.67 us per millisecond
+ *                                    = 13 us of pulse per 20 ms servo frame
+ *
+ * The SG90's dead band is roughly 10-20 us: the servo does not react to a pulse
+ * change smaller than that, so if the pulse only moves a few us per frame it
+ * ignores several frames and then jumps - the door visibly moves "in three
+ * steps". 1500 ms clears the dead band on every frame (one continuous sweep) and
+ * still crosses the 90 degrees in a second and a half. Faster than ~1000 ms is a
+ * single snap, slower than ~2000 ms starts stepping again.
+ *
+ * This is the power-on default only. TRAVEL=<ms> changes it at runtime, which is
+ * how it should be tuned: smoothness is perceptual and depends on the linkage. */
+#define DOOR_TRAVEL_MS          1500U
+
+/* Range accepted by Motor_SetTravelMs() (the TRAVEL=<ms> console command). Both
+   ends sit outside the smooth window on purpose, so the two failure modes can be
+   felt rather than described: below the floor is a slam, above the ceiling the
+   door steps. */
+#define MOTOR_TRAVEL_MIN_MS     600U
+#define MOTOR_TRAVEL_MAX_MS     4000U
 
 /*===========================================================================*/
 /*  Presence sensors simulated by keys on this branch                       */
