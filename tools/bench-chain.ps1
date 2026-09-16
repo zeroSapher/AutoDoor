@@ -576,25 +576,37 @@ try {
 
     # -----------------------------------------------------------------------
     Write-Host ''
-    Write-Host '--- G. runtime parameters: SPEED= ---'
+    Write-Host '--- G. runtime parameters: TRAVEL= ---'
     # -----------------------------------------------------------------------
 
-    Step 'SPEED= sets the travel duty' { Send-Cmd 'SPEED=50' } `
-         -Expect 'OK SPEED=50%' -TimeoutMs 3000
+    # The SG90 build has no duty to set: the servo's speed is the servo's, and the
+    # only knob shaping motion is the travel time. SPEED= answers ERR N/A here
+    # deliberately, so the first step pins that down rather than leaving a stale
+    # "OK SPEED=50%" expectation in the chain.
+    Step 'SPEED= is refused on the servo build' { Send-Cmd 'SPEED=50' } `
+         -Expect 'ERR N/A - SG90 speed is fixed' -TimeoutMs 3000
 
-    Step 'STATUS? reports the new duty' { Send-Cmd 'STATUS?' } `
-         -Expect 'SPEED=50%' -TimeoutMs 3000
+    # The parenthesised figure is the pulse movement per 20 ms servo frame - the
+    # number that decides whether the door sweeps or steps - so it is asserted too,
+    # not just the milliseconds that were typed.
+    Step 'TRAVEL= sets the travel time' { Send-Cmd 'TRAVEL=1800' } `
+         -Expect 'OK TRAVEL=1800ms \(11 us of pulse per 20 ms frame\)' -TimeoutMs 3000
 
-    # Below MOTOR_MIN_DUTY the motor will not turn, so the command must refuse
-    # rather than accept a number that Motor_Run() would silently raise again.
-    Step 'a duty below the motor floor is refused' { Send-Cmd 'SPEED=10' } `
-         -Expect 'ERR RANGE 25\.\.100' -TimeoutMs 3000
+    Step 'STATUS? reports the travel time' { Send-Cmd 'STATUS?' } `
+         -Expect 'TRAVEL=1800ms' -TimeoutMs 3000
 
-    Step 'a non-numeric duty is refused' { Send-Cmd 'SPEED=fast' } `
+    # 600..4000 is what Motor_SetTravelMs() accepts. Below the floor the pulse
+    # moves less than the SG90 dead band per frame and the door steps; the point of
+    # refusing is that the operator is told, instead of watching a door that
+    # "moves in three jumps".
+    Step 'a travel time below the floor is refused' { Send-Cmd 'TRAVEL=200' } `
+         -Expect 'ERR RANGE 600\.\.4000' -TimeoutMs 3000
+
+    Step 'a non-numeric travel time is refused' { Send-Cmd 'TRAVEL=fast' } `
          -Expect 'ERR BAD_ARG' -TimeoutMs 3000
 
-    Step 'DEFAULTS puts the duty back' { Send-Cmd 'DEFAULTS' } `
-         -Expect 'speed=70%' -TimeoutMs 3000
+    Step 'DEFAULTS puts the travel time back' { Send-Cmd 'DEFAULTS' } `
+         -Expect 'travel=1500ms' -TimeoutMs 3000
 } catch {
     # Remembered, not rethrown here: exit inside a finally block terminates the
     # script and would swallow the reason. It is reported after the summary.
