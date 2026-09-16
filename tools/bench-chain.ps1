@@ -595,10 +595,12 @@ try {
     Step 'STATUS? reports the travel time' { Send-Cmd 'STATUS?' } `
          -Expect 'TRAVEL=1800ms' -TimeoutMs 3000
 
-    # 600..4000 is what Motor_SetTravelMs() accepts. Below the floor the pulse
-    # moves less than the SG90 dead band per frame and the door steps; the point of
-    # refusing is that the operator is told, instead of watching a door that
-    # "moves in three jumps".
+    # 600..4000 is what Motor_SetTravelMs() accepts. The floor is about violence:
+    # 600 ms across the 1000 us span is ~33 us of pulse per 20 ms servo frame, a
+    # slam. The ceiling is about the servo's own dead band: 4000 ms is ~5 us per
+    # frame, below the ~10-20 us an SG90 needs to notice a change, so the door
+    # advances in visible steps. Refusing outside the range tells the operator,
+    # instead of leaving them to infer it from a door that slams or stutters.
     Step 'a travel time below the floor is refused' { Send-Cmd 'TRAVEL=200' } `
          -Expect 'ERR RANGE 600\.\.4000' -TimeoutMs 3000
 

@@ -39,10 +39,15 @@
   * can be halted mid-travel while the servo keeps holding that position. There is
   * no coast to fall back on - see the note on Motor_EmergencyStop().
   *
-  * TIMING: TIM3 is clocked at 72 MHz (APB1 timer clock is doubled), so PSC=71
-  * gives a 1 us tick and ARR=20000-1 a 20 ms period. CCR1 is then the pulse width
-  * in microseconds. A different HSE would break that arithmetic in the same way it
-  * would break the SysTick 1 ms setup.
+  * TIMING: the pulse width is counted in microseconds, so the ONE thing that must
+  * hold is a 1 us timer tick - and the prescaler that produces it is read from the
+  * ACTUAL APB1 timer clock at init (servo_timer_hz()), not from a constant. This
+  * board came up on the 8 MHz HSI (its HSE crystal never starts, RCC_CFGR = 0), so
+  * PSC=7 is what gives the 1 us tick here; 71 would be right at 72 MHz. Hardcoding
+  * 72 MHz on this board produced a 180 ms frame carrying 9 ms pulses - far outside
+  * the servo's range, so the servo ignored the signal and never moved, while
+  * SysTick, the UART baud rate and Delay all kept working because they already
+  * derive from SystemCoreClock. ARR = SERVO_PERIOD_US - 1 keeps the frame at 50 Hz.
   ******************************************************************************
   */
 
