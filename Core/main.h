@@ -224,7 +224,7 @@ extern "C" {
    Hardware/Motor/Motor.c derives the servo slew step from it, so the door takes
    this long by construction and the position estimate is exact. 4000 ms is a
    deliberately slow demonstration sweep (0.25 us of pulse per ms). */
-#define DOOR_TRAVEL_MS          1500U
+#define DOOR_TRAVEL_MS          100U
 
 /*===========================================================================*/
 /*  Presence sensors simulated by keys on this branch                       */
@@ -362,14 +362,33 @@ typedef char exti_inputs_must_occupy_distinct_line_numbers[
 #define SERVO_PORT              GPIOA
 #define SERVO_PIN               GPIO_Pin_6
 #define SERVO_TIM               TIM3
-#define SERVO_TIMER_HZ          72000000U   /* APB1 timers run at HCLK here */
+/* There is deliberately NO clock constant here. The pulse width is counted in
+   microseconds, so the only thing that must hold is a 1 us TIM3 tick, and the
+   prescaler that produces it is derived from the ACTUAL APB1 timer clock in
+   Motor_Init() (servo_timer_hz()). A hardcoded 72000000 on a board running on
+   the 8 MHz HSI produced a 5.5 Hz frame with 9 ms pulses: the servo ignored it
+   and never moved, and nothing else in the firmware noticed. */
 #define SERVO_PERIOD_US         20000U      /* 50 Hz */
 
-/* Pulse widths. 1000..2000 us is a 90 degree swing, which is all a door needs and
+/* Pulse widths. 500 -> 1500 us is 90 degrees of a standard SG90 (1 degree is about
+   11.1 us: 500 us is 0 degrees and 2500 us is 180). Raise SERVO_OPEN_US if the door
+   needs to swing further, lower it if the linkage already multiplies the angle.
    stays clear of the servo's mechanical stops; pushing past ~2400 us makes an
    SG90 buzz against its end stop instead of moving further. */
 #define SERVO_CLOSED_US         1000U
 #define SERVO_OPEN_US           2000U
+/*
+ * 1 on this branch: the actuator takes an ABSOLUTE position command, so Door.c
+ * may drive the mechanism to whatever position its state machine believes it is
+ * in - which is what stops the two drifting apart when a move is interrupted or
+ * the system is reset (a servo has no homing of its own).
+ *
+ * The motor builds deliberately do NOT define this: a DC motor has no absolute
+ * position to command and no feedback to trust, so syncing would mean starting a
+ * move nobody asked for. Door.c tests `#if defined(...) && ...`, so merging this
+ * branch back to those builds stays safe.
+ */
+#define MOTOR_IS_POSITION_ACTUATOR  1U
 
 /* The DC-motor builds' carrier macro, kept because the shared code and the docs
    reference it; on this branch it documents the servo frame rate, not a carrier.

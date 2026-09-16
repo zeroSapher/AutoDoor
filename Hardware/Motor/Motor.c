@@ -111,11 +111,39 @@ static uint8_t pulse_to_percent(uint32_t tenths)
 /*  Public API                                                               */
 /*===========================================================================*/
 
+/** The APB1 timer clock, read from the clock registers at init time.
+ *
+ * The servo's entire contract - a 50 Hz frame, and a pulse width counted in
+ * microseconds - rests on the prescaler turning the timer clock into a 1 us tick.
+ * Hardcoding that clock is a silent trap. This board came up on the 8 MHz HSI
+ * (RCC_CFGR = 0: HSE and PLL were never switched on), a 72000000 constant was
+ * assumed, and PSC=71 therefore produced a 180 ms frame carrying 9 ms pulses.
+ * That is far outside a servo's 0.5-2.5 ms range, so the servo ignored the signal
+ * and never moved - while SysTick, the UART baud rate and Delay all kept working,
+ * because those already derive from SystemCoreClock. The servo was the only part
+ * of the firmware that trusted a number instead of measuring one.
+ *
+ * An APB1 timer is clocked at PCLK1 when the APB1 prescaler is 1, and at twice
+ * PCLK1 when it divides (RM0008, "timer clock frequencies"). Both cases are
+ * handled here, so PSC lands on a 1 us tick at 8 MHz (PSC=7) or 72 MHz (PSC=71).
+ */
+static uint32_t servo_timer_hz(void)
+{
+    RCC_ClocksTypeDef clocks;
+
+    RCC_GetClocksFreq(&clocks);
+
+    return (clocks.PCLK1_Frequency == clocks.HCLK_Frequency)
+               ? clocks.PCLK1_Frequency
+               : (clocks.PCLK1_Frequency * 2U);
+}
+
 void Motor_Init(void)
 {
     GPIO_InitTypeDef        GPIO_InitStructure;
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
     TIM_OCInitTypeDef       TIM_OCInitStructure;
+    uint32_t                timHz;
 
     RCC_APB1PeriphClockCmd(SERVO_TIM_RCC, ENABLE);
     RCC_APB2PeriphClockCmd(SERVO_RCC, ENABLE);
@@ -126,7 +154,8 @@ void Motor_Init(void)
     GPIO_Init(SERVO_PORT, &GPIO_InitStructure);
 
     /* 1 us tick, 20 ms period => CCR1 is a pulse width in microseconds. */
-    TIM_TimeBaseStructure.TIM_Prescaler     = (uint16_t)((SERVO_TIMER_HZ / 1000000U) - 1U);
+    timHz = servo_timer_hz();
+    TIM_TimeBaseStructure.TIM_Prescaler     = (uint16_t)(((timHz / 1000000U) > 0U) ? ((timHz / 1000000U) - 1U) : 0U);
     TIM_TimeBaseStructure.TIM_Period        = (uint16_t)(SERVO_PERIOD_US - 1U);
     TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
     TIM_TimeBaseStructure.TIM_CounterMode   = TIM_CounterMode_Up;
