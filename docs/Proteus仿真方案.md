@@ -14,10 +14,10 @@
 | 门体状态机全部转移 | ✅ **能，且这是主要价值** | 与真机完全同一份 `Door.c` |
 | 串口命令协议 | ✅ 能 | Virtual Terminal 直接收发 |
 | 软件 PWM 波形与斜坡 | ✅ 能 | 虚拟示波器看 PA4/PA5 |
-| 位置推算（`Limit_IsOpen/IsClosed` 的语义） | ✅ 能 | 与真机默认构建相同：按**电机方向 + 已走时间**推算，约 2 s 到位 |
+| 位置推算（`Limit_IsOpen/IsClosed` 的语义） | ✅ 能 | 与真机默认构建相同：按**电机方向 + 已走时间**推算，约 1.5 s 到位（默认 `DOOR_TRAVEL_MS`） |
 | 按键消抖与长短按 | ✅ 能 | 按键元件 |
 | **OLED 显示** | ✅ **能** | 使用 Proteus 的 **OLED12864 I2C**（SSD1306-compatible）模型 |
-| **EEPROM 持久化** | ❌ **不能** | 仿真固件使用 **EEPROM stub**，日志走降级路径 |
+| **EEPROM 持久化** | ❌ **不能** | 仿真固件使用 **EEPROM stub**：它给每次传输都回 NACK，所以仿真里**什么都不落盘** —— 日志走降级路径，`DELAY=` / `MODE=` / `TRAVEL=` 每次上电都回 `(NOT PERSISTED - eeprom write failed)`，`boot#` 与记录数也从不保持 |
 | **电机真实转速/扭矩** | ❌ 不能 | 模型理想化 |
 | **限位开关这条链**（EXTI 立即停机、限位极性、`LIMIT_CONFLICT`） | ❌ **不能** | 仿真固件**也不装限位**（它继承默认构建），没有开关可以拨。要验只能用 `-WithLimits` 另做一套真机变体 |
 | **硬件限位断电回路** | ❌ 不能 | 该方案已作废（本设计不装限位），见 `docs/接线图.md` 第 5 节 |
@@ -109,8 +109,9 @@ Proteus 的 STM32 模型对 NVIC/EXTI 的支持历来看法不一，部分版本
 | KEY4 手动关门/急停 | **PB8** | 同上 | 长按 = 急停 |
 
 > **没有限位开关要接**：门的位置由 `Limit.c` 按**电机方向 + 已走时间**推算
-> （0 % 全关 → 100 % 全开，全程 `DOOR_TRAVEL_MS` = 2000 ms）。
-> 所以仿真里"到位"发生在**发命令后约 2 s**，不需要（也没有）任何开关去拨。
+> （0 % 全关 → 100 % 全开，全程 `DOOR_TRAVEL_MS` 默认 1500 ms，可用 `TRAVEL=<ms>`
+> 在 600..4000 内现场改 —— 仿真里它同样只能**本次运行**生效，见 §4.1）。
+> 所以仿真里"到位"发生在**发命令后约 1.5 s**，不需要（也没有）任何开关去拨。
 > 想看限位那套逻辑（低有效读回、`LIMIT_CONFLICT`、EXTI 立即停机），
 > 只能另做 `-WithLimits` + 真机接线的一套，见 `docs/接线图.md` §2.2。
 
@@ -153,25 +154,35 @@ Proteus 的 STM32 模型对 NVIC/EXTI 的支持历来看法不一，部分版本
 ========================================
  AutoDoor  STM32F103C8T6  v1.0
 ========================================
-*** NO LIMIT SWITCHES: position is a timed estimate (2000ms) ***
-*** the travel watchdog (3200ms) is the only overrun protection ***
-
 I2C idle      : yes                    ← 预期：OLED12864 I2C 总线空闲
 Display       : OK                     ← 预期：OLED12864 应答
 EEPROM @0xA0  : FAILED at 0x0000       ← 预期：stub 报告器件缺失
 Log           : UNAVAILABLE - running with defaults
-Position      : timed estimate, 2000ms travel (open=0 closed=1)
+*** NO LIMIT SWITCHES: position is a timed estimate (1500ms) ***
+*** the travel watchdog (2700ms) is the only overrun protection ***
+
+Position      : timed estimate, 1500ms travel (open=0 closed=1)
+    state: INIT -> IDLE
 Door          : IDLE (press KEY1 to enable)
 ```
+
+> 顺序按上面这份对：`I2C idle` / `Display` / `EEPROM` / `Log` 四行在最前，
+> 两条 `***` 警告与 `Position` 在其后（打印的是**当前生效**的行程时间）；
+> 缩进的 `    state: INIT -> IDLE` 是状态回调自己的一行，不是串口把两行接在了一起。
 
 **判定**：
 - ✅ `Log: UNAVAILABLE` 出现 → **降级路径正确**（这是仿真特意验证的行为）
 - ✅ `Door: IDLE` → 上电时推算位置为 0（全关），位置判断正确
-- ✅ 开头两行 `*** NO LIMIT SWITCHES … ***` → **正常**：仿真与真机默认构建都不装限位，
+- ✅ 那两行 `*** NO LIMIT SWITCHES … ***` → **正常**：仿真与真机默认构建都不装限位，
   这是出货配置的自我说明，不是仿真特有的警告
 - OLED12864 第一行显示 `AutoDoor`，其余区域显示状态和事件
 
 > 仿真**不能**验证 `EEPROM: OK` 与 `records=N` 持久化，那需要真机。
+> stub 对每一次传输都回 NACK，所以仿真里**没有任何东西是持久的**：`boot#` 与
+> `records=` 不会保持，`DELAY=<ms>` / `MODE=` / `TRAVEL=<ms>` 每次都会在正常回显后
+> 追加 ` (NOT PERSISTED - eeprom write failed)`（`DEFAULTS` 同理），下一次上电又回到
+> `delay=5000ms` / `mode=AUTO` / `travel=1500ms`。**这些值是"本次运行"的，不是"这台设备"的** ——
+> 想验证"断电后还在不在"，只能上真机。
 
 > **一个副作用要提前说明**（round 10 起）：没有 EEPROM 时 `LOG?` / `LOG?ALL` / `LOG?<n>`
 > 会回 `ERR EEPROM (log not fully persisted)`，而不是以前那句 `OK LOG EMPTY`。
@@ -209,15 +220,15 @@ Door          : IDLE (press KEY1 to enable)
 
 ### 4.4 测试四：门体状态机全流程
 
-用按键模拟传感器。**没有限位开关要拨**：位置按行程时间推算，约 2 s 到位。
+用按键模拟传感器。**没有限位开关要拨**：位置按行程时间推算，默认约 1.5 s 到位。
 
 | 步骤 | 操作 | 预期串口 |
 |---|---|---|
 | 1 | KEY1 使能 | `SYSTEM_START` |
 | 2 | 按"门外"键 | `ENTER_IN` → `OPEN_START` → OLED 显示 `OPENING` |
-| 3 | **什么都不按，等约 2 s** | `LIMIT open edge` → `OPEN_DONE DUR=xxxxms` → `OPEN`（状态**自己**变，没有开关可拨） |
+| 3 | **什么都不按，等约 1.5 s** | `LIMIT open edge` → `OPEN_DONE DUR=xxxxms` → `OPEN`（状态**自己**变，没有开关可拨） |
 | 4 | 等待 5 s 不操作 | `CLOSE_START` → `CLOSING`，蜂鸣器响 |
-| 5 | **再等约 2 s** | `CLOSE_DONE` → `IDLE` |
+| 5 | **再等约 1.5 s** | `CLOSE_DONE` → `IDLE` |
 | 6 | 重复 2，然后立刻再按一次"门外" | 倒计时**重新开始**（门保持开启） |
 | 7 | 关门途中按"门内"键 | `REVERSE` → 门立即反转到 `OPEN` |
 
@@ -231,14 +242,14 @@ Door          : IDLE (press KEY1 to enable)
 
 | 注入 | 预期 |
 |---|---|
-| 在门仍处于 `OPENING`/`CLOSING` 时，用 SWD 把行程起点推早：`set var 'Door.c'::s_travelStartMs = g_msTick - 4000` | 超过 `DOOR_TRAVEL_TIMEOUT_MS`（默认构建 **3200 ms** = 2000 + 1200 余量）→ `FAULT_OPEN_TIMEOUT` → `STOPPED`，蜂鸣器三短鸣，LED 双闪 |
+| 在门仍处于 `OPENING`/`CLOSING` 时，用 SWD 把行程起点推早：`set var 'Door.c'::s_travelStartMs = g_msTick - 4000` | 超过 `DOOR_TRAVEL_TIMEOUT_MS`（默认构建 **2700 ms** = 1500 + 1200 余量）→ `FAULT_OPEN_TIMEOUT` → `STOPPED`，蜂鸣器三短鸣，LED 双闪 |
 | 长按 KEY4 | 立即停机 + `ESTOP`，长鸣 |
 | 急停后再发 `DOOR=OPEN` | **不动作**（故障锁存） |
 | 用串口发 `RESET` | 故障清除，可以重新使能 |
 | 同时在串口发 `STATUS?` | 显示 `FAULT=ESTOP`，并带 `LIMITS=TIMED` |
 
 > **"堵住门 → 超时"这条在仿真和真机默认构建里都不成立**：位置是推算值，
-> 电机只要还在被命令转动，推算位置就照样在约 2 s 后到达端点并判"到位"。
+> 电机只要还在被命令转动，推算位置就照样在约 1.5 s 后到达端点并判"到位"。
 > 看门狗只有在状态机**没有收敛**时才报 —— 这也是"没有位置反馈"的代价之一
 > （见 `Core/main.h` 的 "WHAT IS GIVEN UP"）。
 
@@ -253,7 +264,7 @@ Door          : IDLE (press KEY1 to enable)
 | 门外/门内按键无反应 | 确认接的是 **PB12/PB13**（不是 PB0/PB1——那是旧引脚） |
 | 串口无输出 | 检查 PA9→RXD 是否**交叉**，波特率是否 115200 |
 | 按键无反应 | 若 EXTI 在你的 Proteus 版本上不触发，**等 20–25 ms** —— 固件靠 1 ms 采样兜底，应当仍能识别 |
-| 找不到"限位到位"的动作 | **正常**：本设计不装限位，仿真里也没有开关可拨。到位发生在发命令后约 2 s（`DOOR_TRAVEL_MS`），串口的 `LIMIT open edge` 是推算到位时固件自己产生的边沿 |
+| 找不到"限位到位"的动作 | **正常**：本设计不装限位，仿真里也没有开关可拨。到位发生在发命令后约 1.5 s（默认 `DOOR_TRAVEL_MS` = 1500 ms，`TRAVEL=<ms>` 可改，但仿真里改了不持久化），串口的 `LIMIT open edge` 是推算到位时固件自己产生的边沿 |
 | `STATUS?` 里没有 `LIMITS=TIMED` | 你装的是 `-WithLimits` 变体（它读 PA0/PA1）。仿真请用 `tools/build-sim.ps1` 的镜像，那是默认构建 |
 | 电机不转 | 仿真里正常，看 PWM 波形即可 |
 | 时钟不对导致延时错乱 | 在 STM32 模型属性中确认 **Crystal Frequency = 8 MHz** |
@@ -278,7 +289,7 @@ Door          : IDLE (press KEY1 to enable)
 
 仿真通过**不等于**系统可用。以下项目只能在真机验证，见 `docs/上电调试步骤.md`：
 
-1. **EEPROM 持久化**（断电重启后记录与配置是否保持）
+1. **EEPROM 持久化**（断电重启后记录与配置是否保持，含 `TRAVEL=<ms>` 设的行程时间）
 2. **行程时间标定 `DOOR_TRAVEL_MS`**（真门实测，且**宁长勿短**）——
    这是无限位方案里唯一的位置来源
 3. **I2C 总线在电机噪声下的健壮性**（`BusRecover()` 是否会真的被触发）
