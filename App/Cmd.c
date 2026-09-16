@@ -140,6 +140,7 @@ void Cmd_ReportStatus(void)
         UART_SendString(" LIMITS=TIMED");
     }
     UART_Printf(" LIM=%u/%u", (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed());
+    UART_Printf(" TRAVEL=%ums", (unsigned)Motor_GetTravelMs());
     UART_Printf(" I2C=%s", (MyI2C_IsIdle() != 0U) ? "ok" : "STUCK");
     UART_SendLine();
 }
@@ -439,6 +440,8 @@ void Cmd_Process(void)
     /* ---- TRAVEL=<ms> ---------------------------------------------------- */
     if (strncmp(line, "TRAVEL=", 7) == 0)
     {
+        uint8_t persistOk;
+
         if (parse_u32(&line[7], &value) != 0U)
         {
             UART_SendString("ERR BAD_ARG\r\n");
@@ -456,6 +459,12 @@ void Cmd_Process(void)
 
         (void)Motor_SetTravelMs((uint16_t)value);
 
+        /* Persisted, unlike SPEED. It is tuned on the bench, and a value that
+           reverted on the next power-up would have to be re-typed every session.
+           Door.c's travel watchdog follows the live value too, so a silent revert
+           would also change how long a move is allowed to take. */
+        persistOk = (Log_SetPersistedTravelMs((uint16_t)value) == MYI2C_OK) ? 1U : 0U;
+
         Log_Add(LOG_EVT_PARAM_CHANGE, (uint8_t)Door_GetState(),
                 (uint8_t)Door_GetMode(), 0U);
 
@@ -463,12 +472,24 @@ void Cmd_Process(void)
          * Echo the number that actually decides the feel of the door: how far the
          * pulse moves between two servo frames. That, not the millisecond figure,
          * is what the SG90 reacts to - below ~10 us per frame it ignores the change
-         * for several frames and the door visibly steps. Not persisted, for the
-         * same reason as SPEED: it is a commissioning value tied to this rig.
+         * for several frames and the door visibly steps.
+         *
+         * A failed EEPROM write is REPORTED, never swallowed: answering a bare OK
+         * would claim the setting survives a power cut when it does not.
          */
-        UART_Printf("OK TRAVEL=%ums (%u us of pulse per 20 ms frame)\r\n",
-                    (unsigned)value,
-                    (unsigned)(((uint32_t)(SERVO_OPEN_US - SERVO_CLOSED_US) * 20U) / value));
+        if (persistOk != 0U)
+        {
+            UART_Printf("OK TRAVEL=%ums (%u us of pulse per 20 ms frame)\r\n",
+                        (unsigned)value,
+                        (unsigned)(((uint32_t)(SERVO_OPEN_US - SERVO_CLOSED_US) * 20U) / value));
+        }
+        else
+        {
+            UART_Printf("OK TRAVEL=%ums (%u us of pulse per 20 ms frame) "
+                        "(NOT PERSISTED - eeprom write failed)\r\n",
+                        (unsigned)value,
+                        (unsigned)(((uint32_t)(SERVO_OPEN_US - SERVO_CLOSED_US) * 20U) / value));
+        }
         return;
     }
 
@@ -648,12 +669,16 @@ void Cmd_Process(void)
         Door_SetMode(DOOR_MODE_AUTO);
         /* The travel duty belongs to the build, not to the settings, but DEFAULTS
            claims to restore defaults and leaving the door at a tuned speed would
-           make that a half-truth. */
+           make that a half-truth. On the servo build the equivalent setting is the
+           travel time, and unlike the duty it IS persisted - so it is reset here
+           and written back with the other two. */
         (void)Door_SetTravelDuty(MOTOR_DEFAULT_DUTY);
+        (void)Motor_SetTravelMs(DOOR_TRAVEL_MS);
 
-        /* Both writes are reported, not discarded. */
+        /* All three writes are reported, not discarded. */
         persistOk = ((Log_SetAutoCloseMs(DOOR_AUTO_CLOSE_MS) == MYI2C_OK) &&
-                     (Log_SetPersistedMode((uint8_t)DOOR_MODE_AUTO) == MYI2C_OK))
+                     (Log_SetPersistedMode((uint8_t)DOOR_MODE_AUTO) == MYI2C_OK) &&
+                     (Log_SetPersistedTravelMs(DOOR_TRAVEL_MS) == MYI2C_OK))
                     ? 1U : 0U;
 
         Log_Add(LOG_EVT_PARAM_CHANGE, (uint8_t)Door_GetState(),
@@ -661,16 +686,16 @@ void Cmd_Process(void)
 
         if (persistOk != 0U)
         {
-            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO speed=%u%% (log kept)\r\n",
+            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO travel=%ums (log kept)\r\n",
                         (unsigned)DOOR_AUTO_CLOSE_MS,
-                        (unsigned)Door_GetTravelDuty());
+                        (unsigned)DOOR_TRAVEL_MS);
         }
         else
         {
-            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO speed=%u%% "
+            UART_Printf("OK DEFAULTS delay=%ums mode=AUTO travel=%ums "
                         "(NOT PERSISTED - eeprom write failed)\r\n",
                         (unsigned)DOOR_AUTO_CLOSE_MS,
-                        (unsigned)Door_GetTravelDuty());
+                        (unsigned)DOOR_TRAVEL_MS);
         }
         return;
     }
@@ -685,7 +710,7 @@ void Cmd_Process(void)
         UART_SendString("  LOG?ALL           list every retained record\r\n");
         UART_SendString("  LOG?CLEAR         erase all records\r\n");
         UART_SendString("  DELAY=<ms>        auto-close delay, 1000..30000\r\n");
-        UART_SendString("  TRAVEL=<ms>       door travel time, 600..4000 (default 1500)\r\n");
+        UART_SendString("  TRAVEL=<ms>       travel time, 600..4000 (saved; default 1500)\r\n");
         UART_SendString("                    bigger = slower and smoother; 1000..2000 is the\r\n");
         UART_SendString("                    window where an SG90 sweeps instead of stepping\r\n");
         UART_SendString("  SPEED=<%>         n/a on the SG90 build - use TRAVEL=<ms>\r\n");

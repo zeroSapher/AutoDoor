@@ -16,7 +16,8 @@
   *   +17 generation 2 bytes  erase generation (see CLEARING below)
   *   +19 totalLo    4 bytes  lifetime event counter, low 32 bits
   *   +23 totalHi    4 bytes  lifetime event counter, high 32 bits
-  *   +27 reserved   5 bytes
+  *   +27 travelMs   2 bytes  servo travel time in ms, persisted
+  *   +29 reserved   3 bytes
   *
   * The header is rewritten whenever a record is flushed. That is one extra
   * 32-byte page write per batch, which is affordable precisely because writes
@@ -80,18 +81,20 @@
 #define HDR_OFF_GENERATION  17U
 #define HDR_OFF_TOTAL_LO    19U
 #define HDR_OFF_TOTAL_HI    23U
+#define HDR_OFF_TRAVEL      27U
 
 #define LOG_MAGIC_0         'A'
 #define LOG_MAGIC_1         'D'
 #define LOG_MAGIC_2         'R'
 #define LOG_MAGIC_3         'M'
 
-/* 2 since records gained the generation field (offset 13..14 of the record,
-   previously reserved and written as zero). A version-1 header is rebuilt from
-   scratch: its records read back as generation 0 while the new header starts at
-   generation 1, so they are ignored rather than misinterpreted. Nothing has been
-   deployed, so this costs nobody a log. */
-#define LOG_VERSION         2U
+/* 3 since the header gained the servo travel time at offset 27 - previously
+   reserved, and header_write() memsets the page, so a version-2 header reads 0
+   there and the range check in Log_Init() turns that into the build default.
+   A version-1 header is rebuilt from scratch: its records read back as generation
+   0 while the new header starts at generation 1, so they are ignored rather than
+   misinterpreted. Nothing has been deployed, so this costs nobody a log. */
+#define LOG_VERSION         3U
 
 /* Generation written on a freshly initialised unit. Never 0, so that records
    left over from a version-1 layout (generation 0) are never accepted. */
@@ -151,6 +154,7 @@ typedef struct
     uint16_t wrIndex;
     uint16_t delayMs;
     uint8_t  mode;
+    uint16_t travelMs;
     uint16_t seqNext;
     uint16_t bootId;
     uint16_t generation;    /* bumped by Log_Clear(); records must match */
@@ -263,6 +267,7 @@ static uint8_t header_write(void)
     put16(&buf[HDR_OFF_WRINDEX],  s_hdr.wrIndex);
     put16(&buf[HDR_OFF_DELAY],    s_hdr.delayMs);
     buf[HDR_OFF_MODE] = s_hdr.mode;
+    put16(&buf[HDR_OFF_TRAVEL],   s_hdr.travelMs);
     put16(&buf[HDR_OFF_SEQ_NEXT], s_hdr.seqNext);
     put16(&buf[HDR_OFF_BOOT_ID],  s_hdr.bootId);
     put16(&buf[HDR_OFF_GENERATION], s_hdr.generation);
@@ -477,23 +482,28 @@ static uint8_t rebuild_from_records(uint16_t *newestSeqOut)
   */
 static uint8_t initialise_fresh(const uint8_t *oldHdr)
 {
-    uint16_t preservedDelay = DOOR_AUTO_CLOSE_MS;
-    uint8_t  preservedMode  = 0U;
-    uint16_t preservedSeq   = 0U;
-    uint64_t preservedTotal = 0ULL;
-    uint16_t firstBootId    = 1U;
+    uint16_t preservedDelay  = DOOR_AUTO_CLOSE_MS;
+    uint8_t  preservedMode   = 0U;
+    uint16_t preservedTravel = DOOR_TRAVEL_MS;
+    uint16_t preservedSeq    = 0U;
+    uint64_t preservedTotal  = 0ULL;
+    uint16_t firstBootId     = 1U;
 
     if (oldHdr != 0)
     {
-        preservedDelay = get16(&oldHdr[HDR_OFF_DELAY]);
-        preservedMode  = oldHdr[HDR_OFF_MODE];
-        preservedSeq   = get16(&oldHdr[HDR_OFF_SEQ_NEXT]);
-        preservedTotal = (((uint64_t)get32(&oldHdr[HDR_OFF_TOTAL_HI])) << 32) |
-                         (uint64_t)get32(&oldHdr[HDR_OFF_TOTAL_LO]);
-        firstBootId    = (uint16_t)(get16(&oldHdr[HDR_OFF_BOOT_ID]) + 1U);
+        preservedDelay  = get16(&oldHdr[HDR_OFF_DELAY]);
+        preservedMode   = oldHdr[HDR_OFF_MODE];
+        preservedTravel = get16(&oldHdr[HDR_OFF_TRAVEL]);
+        preservedSeq    = get16(&oldHdr[HDR_OFF_SEQ_NEXT]);
+        preservedTotal  = (((uint64_t)get32(&oldHdr[HDR_OFF_TOTAL_HI])) << 32) |
+                          (uint64_t)get32(&oldHdr[HDR_OFF_TOTAL_LO]);
+        firstBootId     = (uint16_t)(get16(&oldHdr[HDR_OFF_BOOT_ID]) + 1U);
 
         /* Clamp exactly as the normal load path does - an old header deserves
-           no more trust than a current one. */
+           no more trust than a current one. A version-2 header has zeros in the
+           travel field (the page is memset before the fields are written), and
+           this is what turns that into the build default instead of a 0 ms
+           travel time - which would mean "the servo never moves". */
         if ((preservedDelay < DOOR_AUTO_CLOSE_MIN_MS) ||
             (preservedDelay > DOOR_AUTO_CLOSE_MAX_MS))
         {
@@ -502,6 +512,11 @@ static uint8_t initialise_fresh(const uint8_t *oldHdr)
         if (preservedMode > 1U)
         {
             preservedMode = 0U;
+        }
+        if ((preservedTravel < MOTOR_TRAVEL_MIN_MS) ||
+            (preservedTravel > MOTOR_TRAVEL_MAX_MS))
+        {
+            preservedTravel = DOOR_TRAVEL_MS;
         }
     }
 
@@ -521,6 +536,7 @@ static uint8_t initialise_fresh(const uint8_t *oldHdr)
     s_hdr.wrIndex     = 0U;
     s_hdr.delayMs     = preservedDelay;
     s_hdr.mode        = preservedMode;
+    s_hdr.travelMs    = preservedTravel;
     s_hdr.seqNext     = preservedSeq;
     s_hdr.bootId      = firstBootId;
     s_hdr.generation  = LOG_GENERATION_INIT;
@@ -599,9 +615,19 @@ uint8_t Log_Init(void)
 
     s_hdr.delayMs     = get16(&hdr[HDR_OFF_DELAY]);
     s_hdr.mode        = hdr[HDR_OFF_MODE];
+    s_hdr.travelMs    = get16(&hdr[HDR_OFF_TRAVEL]);
     s_hdr.seqNext     = get16(&hdr[HDR_OFF_SEQ_NEXT]);
     s_hdr.bootId      = get16(&hdr[HDR_OFF_BOOT_ID]);
     s_hdr.generation  = get16(&hdr[HDR_OFF_GENERATION]);
+
+    /* Out of range means a stale or damaged header (the version check catches a
+       layout change, this catches a bit flip). Fall back here rather than let
+       Motor_SetTravelMs() refuse it later: a refused set would leave the servo at
+       the power-on default with nothing in the log to say why. */
+    if ((s_hdr.travelMs < MOTOR_TRAVEL_MIN_MS) || (s_hdr.travelMs > MOTOR_TRAVEL_MAX_MS))
+    {
+        s_hdr.travelMs = DOOR_TRAVEL_MS;
+    }
     s_hdr.totalEvents = (((uint64_t)get32(&hdr[HDR_OFF_TOTAL_HI])) << 32) |
                         (uint64_t)get32(&hdr[HDR_OFF_TOTAL_LO]);
 
@@ -1124,6 +1150,23 @@ uint8_t Log_SetPersistedMode(uint8_t mode)
     }
 
     s_hdr.mode = mode;
+
+    return header_write();
+}
+
+uint16_t Log_GetPersistedTravelMs(void)
+{
+    return s_hdr.travelMs;
+}
+
+uint8_t Log_SetPersistedTravelMs(uint16_t ms)
+{
+    if ((ms < MOTOR_TRAVEL_MIN_MS) || (ms > MOTOR_TRAVEL_MAX_MS))
+    {
+        return 1U;
+    }
+
+    s_hdr.travelMs = ms;
 
     return header_write();
 }

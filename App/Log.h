@@ -179,6 +179,13 @@ uint8_t  Log_SetAutoCloseMs(uint16_t ms);
 uint8_t  Log_SetPersistedMode(uint8_t mode);
 uint8_t  Log_GetPersistedMode(void);
 
+/* The servo's travel time, persisted for the same reason the delay is: it is set
+   on the bench and re-typing it after every power cut would be absurd. Door.c's
+   travel watchdog follows the live value, so a travel time that silently reverted
+   to the default would also change how long a move may take. */
+uint16_t Log_GetPersistedTravelMs(void);
+uint8_t  Log_SetPersistedTravelMs(uint16_t ms);
+
 /** @return The boot counter, incremented once per power-up. */
 uint16_t Log_GetBootId(void);
 

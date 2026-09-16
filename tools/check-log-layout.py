@@ -36,7 +36,7 @@ MAIN_H = ROOT / "Core" / "main.h"
 # Counts the parser must find, so a silent regex miss cannot masquerade as a
 # pass. Update these when the format legitimately gains a field - having to
 # touch this file is the point.
-EXPECTED_HDR_WRITES = 14      # 4 magic bytes + 7 put16 + 2 put32 + 1 byte field
+EXPECTED_HDR_WRITES = 15      # 4 magic bytes + 8 put16 + 2 put32 + 1 byte field
 EXPECTED_REC_WRITES = 8
 EXPECTED_REC_READS = 10       # 3 get16 + 1 get32 + 3 byte + 3 reserved bytes
 
@@ -52,6 +52,7 @@ EXPECTED_HDR_FIELDS = {
     "HDR_OFF_WRINDEX":  ("put16", "s_hdr.wrIndex"),
     "HDR_OFF_DELAY":    ("put16", "s_hdr.delayMs"),
     "HDR_OFF_MODE":     ("byte",  "s_hdr.mode"),
+    "HDR_OFF_TRAVEL":   ("put16", "s_hdr.travelMs"),
     "HDR_OFF_SEQ_NEXT": ("put16", "s_hdr.seqNext"),
     "HDR_OFF_BOOT_ID":  ("put16", "s_hdr.bootId"),
     "HDR_OFF_GENERATION": ("put16", "s_hdr.generation"),

@@ -210,6 +210,24 @@ static void poll_inputs(void)
 /*  Entry point                                                              */
 /*===========================================================================*/
 
+/** The travel time actually in force.
+  *
+  * On the servo build that is the persisted value (TRAVEL=<ms>), read back from
+  * the EEPROM at start-up; on the motor builds there is nothing to persist and it
+  * is the compiled default. Used by the boot report so that the log states ONE
+  * number for the setting - an earlier version printed the build default while
+  * STATUS? printed something else, and a log that disagrees with itself is worse
+  * than a log with no number in it.
+  */
+static uint16_t travel_ms_in_force(void)
+{
+#if defined(MOTOR_IS_POSITION_ACTUATOR) && MOTOR_IS_POSITION_ACTUATOR
+    return Motor_GetTravelMs();
+#else
+    return DOOR_TRAVEL_MS;
+#endif
+}
+
 int main(void)
 {
     DoorHooks_t hooks;
@@ -258,22 +276,6 @@ int main(void)
     UART_SendString("========================================\r\n");
     UART_SendString(" AutoDoor  STM32F103C8T6  v1.0\r\n");
     UART_SendString("========================================\r\n");
-
-    /*
-     * State the position feedback on every boot, before anything else. This
-     * design fits no limit switches, so the door is driven for a calibrated time
-     * and then assumed to have arrived: anyone reading this log needs to know the
-     * position is an estimate and that the travel watchdog is the only overrun
-     * protection. It is a property of the build, not a warning about it.
-     */
-    if (Limit_IsSimulated() != 0U)
-    {
-        UART_Printf("*** NO LIMIT SWITCHES: position is a timed estimate (%ums) ***\r\n",
-                    (unsigned)DOOR_TRAVEL_MS);
-        UART_Printf("*** the travel watchdog (%ums) is the only overrun protection ***\r\n",
-                    (unsigned)DOOR_TRAVEL_TIMEOUT_MS);
-        UART_SendLine();
-    }
 
     /*
      * Report EXTI line conflicts. The input modules are initialised before the
@@ -336,11 +338,43 @@ int main(void)
         UART_SendString("Log           : UNAVAILABLE - running with defaults\r\n");
     }
 
+#if defined(MOTOR_IS_POSITION_ACTUATOR) && MOTOR_IS_POSITION_ACTUATOR
+    /*
+     * Put the persisted travel time in force before anything can move: the slew
+     * step is derived from it and Door.c's travel watchdog follows it. Re-reading
+     * it here, rather than trusting the build default, is what makes TRAVEL=<ms>
+     * survive a power cut.
+     */
+    if (logOk != 0U)
+    {
+        (void)Motor_SetTravelMs(Log_GetPersistedTravelMs());
+    }
+#endif
+
+    /*
+     * State the position feedback on every boot, once the settings are known. This
+     * design fits no limit switches, so the door is driven for a calibrated time
+     * and then assumed to have arrived: anyone reading this log needs to know the
+     * position is an estimate and that the travel watchdog is the only overrun
+     * protection. It is a property of the build, not a warning about it.
+     *
+     * Both numbers come from the value in force, never from the macros - a log
+     * that states two different travel times is how trust in a log is lost.
+     */
+    if (Limit_IsSimulated() != 0U)
+    {
+        UART_Printf("*** NO LIMIT SWITCHES: position is a timed estimate (%ums) ***\r\n",
+                    (unsigned)travel_ms_in_force());
+        UART_Printf("*** the travel watchdog (%ums) is the only overrun protection ***\r\n",
+                    (unsigned)(travel_ms_in_force() + DOOR_TRAVEL_MARGIN_MS));
+        UART_SendLine();
+    }
+
     /* ---- 9. Position feedback as it stands at start-up ------------------- */
     if (Limit_IsSimulated() != 0U)
     {
         UART_Printf("Position      : timed estimate, %ums travel (open=%u closed=%u)\r\n",
-                    (unsigned)DOOR_TRAVEL_MS,
+                    (unsigned)travel_ms_in_force(),
                     (unsigned)Limit_IsOpen(), (unsigned)Limit_IsClosed());
     }
     else
