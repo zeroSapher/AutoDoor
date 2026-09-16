@@ -5,43 +5,44 @@
   *
   * WHY THIS IS NOT A DRIVER SWAP
   * -----------------------------
-  * The L9110S/TB6612 builds drive a CONTINUOUS-ROTATION motor: they command a
-  * direction plus a duty and keep driving until told to stop, which is why that
-  * firmware needs a travel estimate and a story about end stops.
-  *
-  * An SG90 is a POSITION actuator. It takes a 50 Hz pulse train, moves to the
-  * angle the pulse width encodes, and then HOLDS it against load. Open and closed
-  * are two pulse widths, there is no duty to modulate, and a servo that is not
-  * being moved is already holding the door - the behaviour the DC version could
-  * only approximate by calling Motor_Brake() (which it never did).
+  * The L9110S/TB6612 builds drive a CONTINUOUS-ROTATION motor: direction plus
+  * duty, held until told to stop, which is why that firmware needs a travel
+  * estimate and a story about end stops. An SG90 is a POSITION actuator: a 50 Hz
+  * pulse train encodes an angle, the servo goes there and HOLDS it against load.
+  * Open and closed are two pulse widths; there is no duty and no coast.
   *
   *   pulse SERVO_CLOSED_US -> door closed
   *   pulse SERVO_OPEN_US   -> door open
   *
-  * THE SLEW, AND WHY IT IS THE INTERESTING PART
-  * -------------------------------------------
-  * An SG90 covers that span in roughly 150 ms, which would slam the door. Instead
-  * Motor_Tick1ms() walks the emitted pulse toward the target one step per
-  * millisecond, so the servo FOLLOWS the commanded pulse and the door moves
-  * gently. The step is derived from DOOR_TRAVEL_MS, which makes the two agree by
-  * construction:
+  * THE SLEW IS THE SPEED CONTROL
+  * -----------------------------
+  * An SG90 crosses that span in ~150 ms, which slams a door. Motor_Tick1ms()
+  * instead walks the emitted pulse toward the target one step per millisecond, so
+  * the servo FOLLOWS the pulse and the door moves gently. The step is derived from
+  * DOOR_TRAVEL_MS:
   *
-  *   step = (SERVO_OPEN_US - SERVO_CLOSED_US) / DOOR_TRAVEL_MS
+  *     step = (span in tenths of a microsecond) / DOOR_TRAVEL_MS
   *
-  * so the firmware's timed position estimate and the servo's real travel are the
-  * same number. On the DC-motor builds that estimate was a guess that had to be
-  * calibrated against the mechanism; here it is exact, because this driver decides
-  * how fast the pulse travels.
+  * which makes the firmware's timed position estimate and the servo's real travel
+  * the same number by construction. Stretching DOOR_TRAVEL_MS is therefore the way
+  * to slow the door down, and it costs nothing in accuracy.
   *
-  * Freezing is real: Motor_Stop() points the target at the current pulse, so a
-  * move can be halted mid-travel (and Motor_EmergencyStop() freezes instantly)
-  * while the servo keeps holding that position. There is no coast state to fall
-  * back on - see the note on Motor_EmergencyStop().
+  * WHY THE PULSE IS TRACKED IN TENTHS OF A MICROSECOND
+  * ---------------------------------------------------
+  * The timer only resolves 1 us, but the slew step has to be able to be finer than
+  * 1 us per ms: with integer microseconds a travel time longer than the pulse span
+  * in milliseconds rounds the step to zero and the servo never moves at all. The
+  * extra digit is what allows a slow demo door (DOOR_TRAVEL_MS = 4000 here, i.e.
+  * 0.25 us/ms) instead of making it a compile error.
+  *
+  * Freezing is real: Motor_Stop() points the target at the current pulse, so a move
+  * can be halted mid-travel while the servo keeps holding that position. There is
+  * no coast to fall back on - see the note on Motor_EmergencyStop().
   *
   * TIMING: TIM3 is clocked at 72 MHz (APB1 timer clock is doubled), so PSC=71
-  * gives a 1 us tick and ARR=20000-1 a 20 ms period. CCR1 is then literally the
-  * pulse width in microseconds. A different HSE would break that arithmetic in
-  * the same way it would break the SysTick 1 ms setup.
+  * gives a 1 us tick and ARR=20000-1 a 20 ms period. CCR1 is then the pulse width
+  * in microseconds. A different HSE would break that arithmetic in the same way it
+  * would break the SysTick 1 ms setup.
   ******************************************************************************
   */
 
@@ -54,42 +55,49 @@
 /*  Geometry                                                                 */
 /*===========================================================================*/
 
-/* One step of the slew, in microseconds per millisecond. Derived so the pulse
-   reaches the far end exactly when the state machine's timed estimate says it
-   has; the compile-time check below rejects a DOOR_TRAVEL_MS so long that the
-   division would round the step down to nothing. */
-#define SLEW_STEP_US        ((SERVO_OPEN_US - SERVO_CLOSED_US) / DOOR_TRAVEL_MS)
+/* Hundredths of a microsecond, not tenths: the slew step is an integer, so with
+   tenths a 4000 ms travel gave 10000/4000 = 2 instead of 2.5 and the pulse only
+   covered 80 % of its span before the state machine declared arrival. Hundredths
+   make 100000/4000 = 25 exact. (A remainder accumulator would be exact for every
+   value; this is the cheap version of the same fix.) */
+#define PULSE_UNITS_PER_US  100U
+#define PULSE_CLOSED        ((uint32_t)SERVO_CLOSED_US * PULSE_UNITS_PER_US)
+#define PULSE_OPEN          ((uint32_t)SERVO_OPEN_US * PULSE_UNITS_PER_US)
+#define SLEW_STEP           ((PULSE_OPEN - PULSE_CLOSED) / DOOR_TRAVEL_MS)
 
 _Static_assert((SERVO_OPEN_US > SERVO_CLOSED_US),
                "servo open pulse must be longer than the closed pulse");
-_Static_assert(((SERVO_OPEN_US - SERVO_CLOSED_US) >= DOOR_TRAVEL_MS),
-               "DOOR_TRAVEL_MS is longer than the pulse span in microseconds, so "
-               "the slew step would be 0 and the servo would never move");
+_Static_assert(((PULSE_OPEN - PULSE_CLOSED) >= DOOR_TRAVEL_MS),
+               "DOOR_TRAVEL_MS is longer than the pulse span in tenths of a "
+               "microsecond, so the slew step would be 0 and the servo would "
+               "never move");
 
 /*===========================================================================*/
 /*  Internal state                                                           */
 /*===========================================================================*/
 
-static volatile MotorDir_t s_dir          = MOTOR_DIR_STOP;
-static volatile uint16_t   s_pulseNow     = SERVO_CLOSED_US;
-static volatile uint16_t   s_pulseTarget  = SERVO_CLOSED_US;
-static uint8_t             s_initialised  = 0U;
+static volatile MotorDir_t s_dir         = MOTOR_DIR_STOP;
+static volatile uint32_t   s_pulseNow    = PULSE_CLOSED;   /* tenths of a us */
+static volatile uint32_t   s_pulseTarget = PULSE_CLOSED;
+static uint8_t             s_initialised = 0U;
 
 /*===========================================================================*/
 /*  Helpers                                                                  */
 /*===========================================================================*/
 
-/** Emit a pulse width. Written straight to CCR1: the timer does the rest. */
-static void emit_pulse(uint16_t us)
+/** Emit a pulse. Rounds to the timer's 1 us granularity rather than truncating,
+    so the middle of a travel lands where it should. */
+static void emit_pulse(uint32_t tenths)
 {
-    TIM_SetCompare1(SERVO_TIM, (uint16_t)us);
+    TIM_SetCompare1(SERVO_TIM,
+                    (uint16_t)((tenths + (PULSE_UNITS_PER_US / 2U)) / PULSE_UNITS_PER_US));
 }
 
-/** @return The duty equivalent of a pulse, for the status reporting path. */
-static uint8_t pulse_to_percent(uint16_t us)
+/** @return Travel as a percentage, so the status path stays meaningful. */
+static uint8_t pulse_to_percent(uint32_t tenths)
 {
-    uint32_t span = (uint32_t)(SERVO_OPEN_US - SERVO_CLOSED_US);
-    uint32_t off  = (us > SERVO_CLOSED_US) ? (uint32_t)(us - SERVO_CLOSED_US) : 0U;
+    uint32_t span = (uint32_t)(PULSE_OPEN - PULSE_CLOSED);
+    uint32_t off  = (tenths > PULSE_CLOSED) ? (uint32_t)(tenths - PULSE_CLOSED) : 0U;
 
     if (off >= span)
     {
@@ -112,17 +120,16 @@ void Motor_Init(void)
     RCC_APB1PeriphClockCmd(SERVO_TIM_RCC, ENABLE);
     RCC_APB2PeriphClockCmd(SERVO_RCC, ENABLE);
 
-    /* PA6 as TIM3_CH1, alternate function push-pull. */
     GPIO_InitStructure.GPIO_Pin   = SERVO_PIN;
     GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_PP;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init(SERVO_PORT, &GPIO_InitStructure);
 
     /* 1 us tick, 20 ms period => CCR1 is a pulse width in microseconds. */
-    TIM_TimeBaseStructure.TIM_Prescaler         = (uint16_t)((SERVO_TIMER_HZ / 1000000U) - 1U);
-    TIM_TimeBaseStructure.TIM_Period            = (uint16_t)(SERVO_PERIOD_US - 1U);
-    TIM_TimeBaseStructure.TIM_ClockDivision     = TIM_CKD_DIV1;
-    TIM_TimeBaseStructure.TIM_CounterMode       = TIM_CounterMode_Up;
+    TIM_TimeBaseStructure.TIM_Prescaler     = (uint16_t)((SERVO_TIMER_HZ / 1000000U) - 1U);
+    TIM_TimeBaseStructure.TIM_Period        = (uint16_t)(SERVO_PERIOD_US - 1U);
+    TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
+    TIM_TimeBaseStructure.TIM_CounterMode   = TIM_CounterMode_Up;
     TIM_TimeBaseInit(SERVO_TIM, &TIM_TimeBaseStructure);
 
     TIM_OCInitStructure.TIM_OCMode      = TIM_OCMode_PWM1;
@@ -135,11 +142,11 @@ void Motor_Init(void)
     TIM_ARRPreloadConfig(SERVO_TIM, ENABLE);
     TIM_Cmd(SERVO_TIM, ENABLE);
 
-    /* Power up pointing at "closed", holding it, so the door cannot drift while
+    /* Power up pointing at "closed" and holding it, so the door cannot drift while
        the rest of the firmware is still initialising. */
     s_dir         = MOTOR_DIR_STOP;
-    s_pulseNow    = SERVO_CLOSED_US;
-    s_pulseTarget = SERVO_CLOSED_US;
+    s_pulseNow    = PULSE_CLOSED;
+    s_pulseTarget = PULSE_CLOSED;
     emit_pulse(s_pulseNow);
     s_initialised = 1U;
 }
@@ -154,12 +161,12 @@ void Motor_Run(MotorDir_t dir)
     if (dir == MOTOR_DIR_OPEN)
     {
         s_dir         = MOTOR_DIR_OPEN;
-        s_pulseTarget = SERVO_OPEN_US;
+        s_pulseTarget = PULSE_OPEN;
     }
     else if (dir == MOTOR_DIR_CLOSE)
     {
         s_dir         = MOTOR_DIR_CLOSE;
-        s_pulseTarget = SERVO_CLOSED_US;
+        s_pulseTarget = PULSE_CLOSED;
     }
     else
     {
@@ -179,9 +186,8 @@ void Motor_Stop(void)
 
 void Motor_Brake(void)
 {
-    /* Identical to Stop here, and that is not a shortcut: a servo holds its
-       position whenever it is powered, so there is no separate braking state to
-       enter. The API keeps the call for the builds that do have one. */
+    /* Identical to Stop here, and that is not a shortcut: a servo holds position
+       whenever it is powered, so there is no separate braking state to enter. */
     Motor_Stop();
     s_dir = MOTOR_DIR_BRAKE;
 }
@@ -191,12 +197,12 @@ void Motor_EmergencyStop(void)
     /* Freeze at the pulse that is on the wire right now, not at the target: an
        emergency stop must not let the door finish a move it has started.
        Unlike the H-bridge builds there is NO coast state to fall back on - a servo
-       with no pulses goes limp, and a door that falls open or shut by itself is
-       not a safer failure. Holding is the safe state here, and the position is
-       only as wrong as it already was.
-       (If a pushable door is wanted instead, disabling the channel - TIM_Cmd(
-       SERVO_TIM, DISABLE) - detaches the servo. That is a deliberate behaviour
-       choice, not a tuning knob, so it is not the default.) */
+       with no pulses goes limp, and a door that falls open or shut by itself is not
+       a safer failure. Holding is the safe state, and the position is only as wrong
+       as it already was.
+       (For a pushable door instead, disable the channel - TIM_Cmd(SERVO_TIM,
+       DISABLE) - which detaches the servo. That is a deliberate behaviour choice,
+       not a tuning knob, so it is not the default.) */
     s_pulseTarget = s_pulseNow;
     s_dir         = MOTOR_DIR_STOP;
     emit_pulse(s_pulseNow);
@@ -204,16 +210,15 @@ void Motor_EmergencyStop(void)
 
 void Motor_SetDuty(uint8_t percent)
 {
-    /* Accepted and ignored: an SG90's speed is fixed by the servo, not by a duty
-       cycle, and this driver's only speed control is the slew step. The callers
-       keep calling it because they are shared with the motor builds; SPEED=<%> is
-       answered with "n/a" on this branch so nobody is told a number was applied. */
+    /* Accepted and ignored: an SG90's speed is fixed by the servo, and this
+       driver's only speed control is the slew, which follows DOOR_TRAVEL_MS. The
+       callers keep calling it because they are shared with the motor builds;
+       SPEED=<%> answers "n/a" on this branch so nobody is told a number applied. */
     (void)percent;
 }
 
 uint8_t Motor_GetDuty(void)
 {
-    /* Report travel as a percentage so the status path stays meaningful. */
     return pulse_to_percent(s_pulseNow);
 }
 
@@ -246,13 +251,13 @@ void Motor_Tick1ms(void)
 
     if (s_pulseNow < s_pulseTarget)
     {
-        uint16_t next = (uint16_t)(s_pulseNow + SLEW_STEP_US);
+        uint32_t next = s_pulseNow + SLEW_STEP;
 
         s_pulseNow = (next > s_pulseTarget) ? s_pulseTarget : next;
     }
     else
     {
-        uint16_t next = (uint16_t)(s_pulseNow - SLEW_STEP_US);
+        uint32_t next = s_pulseNow - SLEW_STEP;
 
         s_pulseNow = (next < s_pulseTarget) ? s_pulseTarget : next;
     }

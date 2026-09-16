@@ -222,8 +222,9 @@ extern "C" {
 
 /* Full travel, in milliseconds. On this branch it is NOT a guess to be calibrated:
    Hardware/Motor/Motor.c derives the servo slew step from it, so the door takes
-   this long by construction and the position estimate is exact. */
-#define DOOR_TRAVEL_MS          1000U
+   this long by construction and the position estimate is exact. 4000 ms is a
+   deliberately slow demonstration sweep (0.25 us of pulse per ms). */
+#define DOOR_TRAVEL_MS          1500U
 
 /*===========================================================================*/
 /*  Presence sensors simulated by keys on this branch                       */

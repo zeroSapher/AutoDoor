@@ -313,7 +313,15 @@ uint8_t Limit_TakeCloseEvent(void)
 uint8_t Limit_IsOpen(void)
 {
 #if AUTODOOR_NO_LIMITS
-    return (s_simPos >= 100U) ? 1U : 0U;
+    /* The ACTUATOR's commanded position, not the time-based estimate below.
+       A servo's pulse IS its absolute position, so tracking the two separately is
+       what let the firmware believe "closed" while the servo sat mid-travel - and
+       made an open that started mid-way settle early (shorter distance) while a
+       close ran the full time, which reads as the two directions moving at
+       different rates. Deriving the limit from the pulse makes the state machine
+       settle exactly when the pulse reaches the end, so both directions slew at
+       the same rate and the reported position cannot lie. */
+    return (Motor_GetDuty() >= 100U) ? 1U : 0U;
 #else
     return Debounce_IsActive(&s_open);
 #endif
@@ -322,7 +330,7 @@ uint8_t Limit_IsOpen(void)
 uint8_t Limit_IsClosed(void)
 {
 #if AUTODOOR_NO_LIMITS
-    return (s_simPos == 0U) ? 1U : 0U;
+    return (Motor_GetDuty() == 0U) ? 1U : 0U;
 #else
     return Debounce_IsActive(&s_close);
 #endif
